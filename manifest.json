@@ -17,21 +17,21 @@
     "storage"
   ],
   "host_permissions": [
-    "*://*.xiaohongshu.com/*"
+    "https://*.xiaohongshu.com/*"
   ],
   "background": {
     "service_worker": "src/background.js"
   },
   "content_scripts": [
     {
-      "matches": ["*://*.xiaohongshu.com/*"],
+      "matches": ["https://*.xiaohongshu.com/*"],
       "js": ["src/page-interceptor.js"],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": false
     },
     {
-      "matches": ["*://*.xiaohongshu.com/*"],
+      "matches": ["https://*.xiaohongshu.com/*"],
       "js": [
         "src/content/styles.js",
         "src/content/ui.js",

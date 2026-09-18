@@ -290,6 +290,9 @@ async function runBatch(tabId, tasks, noteId) {
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || !msg.type) return false;
 
+  // 只接受来自本扩展自身（内容脚本 / popup / options）的消息
+  if (!sender || sender.id !== chrome.runtime.id) return false;
+
   // 一律以 sender.tab.id 为准，绝不信任消息里传来的 tabId
   var tabId = sender.tab ? sender.tab.id : null;
 
@@ -302,6 +305,12 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       var tasks = (msg.payload && msg.payload.tasks) || [];
       if (!tasks.length) {
         sendResponse({ ok: false, error: 'empty' });
+        return false;
+      }
+      // 防御性上限：单批次不超过 300 个文件，避免被页面脚本诱导
+      // 发起海量下载请求（相当于滥用扩展的下载能力）
+      if (tasks.length > 300) {
+        sendResponse({ ok: false, error: 'too-many' });
         return false;
       }
       active = { cancelled: false };

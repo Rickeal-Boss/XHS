@@ -70,6 +70,11 @@ var XHS_DL_CSS = `
 .xhs-dl ul, .xhs-dl li { list-style: none; }
 .xhs-dl svg { display: block; flex: 0 0 auto; }
 
+/* 安全网：凡是带 display 声明的元素，hidden 属性都会失效
+   （作者样式的 display 会盖过 UA 的 [hidden]{display:none}）。
+   这里显式兜底，避免再次踩坑。 */
+[hidden] { display: none !important; }
+
 /* ============================ 悬浮球 ============================ */
 .xhs-dl-ball {
   position: fixed;
@@ -124,11 +129,17 @@ var XHS_DL_CSS = `
   inset: 0;
   z-index: var(--xhs-z-panel);
   background: rgba(0, 0, 0, .32);
+  display: none;
+}
+.xhs-dl-mask.is-open {
+  display: block;
   animation: xhs-dl-fade .2s ease;
 }
 @keyframes xhs-dl-fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* ============================ 面板 ============================ */
+/* 关键：显隐由 .is-open 类驱动，不要用 hidden 属性 —— 本规则里的 display
+   会覆盖 UA 的 [hidden]{display:none}，导致面板永远打不开。 */
 .xhs-dl-panel {
   position: fixed;
   top: 0;
@@ -139,12 +150,17 @@ var XHS_DL_CSS = `
   max-width: calc(100vw - 48px);
   background: var(--xhs-bg);
   box-shadow: var(--xhs-sh-lg);
-  display: flex;
+  display: none;
   flex-direction: column;
-  transform: translateX(100%);
-  animation: xhs-dl-in .26s cubic-bezier(.23, 1, .32, 1) forwards;
 }
-@keyframes xhs-dl-in { to { transform: translateX(0); } }
+.xhs-dl-panel.is-open {
+  display: flex;
+  animation: xhs-dl-in .26s cubic-bezier(.23, 1, .32, 1);
+}
+@keyframes xhs-dl-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
 
 /* --------------------------- 头部 --------------------------- */
 .xhs-dl-head {
@@ -442,7 +458,7 @@ var XHS_DL_CSS = `
 @media (prefers-reduced-motion: reduce) {
   .xhs-dl-ball, .xhs-dl-item, .xhs-dl-toast, .xhs-dl-bar > i { transition: none !important; }
   .xhs-dl-toast { animation: none !important; }
-  .xhs-dl-panel { animation: none !important; transform: none !important; }
-  .xhs-dl-mask { animation: none !important; }
+  .xhs-dl-panel.is-open { animation: none !important; }
+  .xhs-dl-mask.is-open { animation: none !important; }
 }
 `;

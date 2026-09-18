@@ -69,10 +69,8 @@ var XHS_DL_UI = (function () {
     els.ball.title = '小红书下载助手';
 
     els.mask = el('div', 'xhs-dl-mask');
-    els.mask.hidden = true;
 
     els.panel = el('div', 'xhs-dl-panel');
-    els.panel.hidden = true;
     els.panel.setAttribute('role', 'dialog');
     els.panel.setAttribute('aria-label', '小红书下载助手');
 
@@ -236,7 +234,7 @@ var XHS_DL_UI = (function () {
 
   function bindGlobal() {
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && !els.panel.hidden) close();
+      if (e.key === 'Escape' && isOpen()) close();
     }, true);
     window.addEventListener('resize', function () {
       if (pos.left == null) return;
@@ -250,21 +248,28 @@ var XHS_DL_UI = (function () {
   }
 
   /* --------------------------- 开 / 关 --------------------------- */
+  /* 注意：显隐必须走 .is-open 类，不能用 hidden 属性。
+     本组件对 .xhs-dl-panel 声明了 display，会覆盖 UA 的
+     [hidden]{display:none}，导致 hidden 完全失效、面板永远打不开。 */
+
+  function isOpen() {
+    return !!(els.panel && els.panel.classList.contains('is-open'));
+  }
 
   function open() {
-    els.panel.hidden = false;
-    els.mask.hidden = false;
+    els.panel.classList.add('is-open');
+    els.mask.classList.add('is-open');
     if (handlers.onOpen) handlers.onOpen();
   }
 
   function close() {
-    els.panel.hidden = true;
-    els.mask.hidden = true;
+    els.panel.classList.remove('is-open');
+    els.mask.classList.remove('is-open');
     if (handlers.onClose) handlers.onClose();
   }
 
   function toggle() {
-    if (els.panel.hidden) open(); else close();
+    if (isOpen()) close(); else open();
   }
 
   /* --------------------------- 渲染 --------------------------- */
@@ -450,7 +455,7 @@ var XHS_DL_UI = (function () {
     open: open,
     close: close,
     toggle: toggle,
-    isOpen: function () { return els.panel && !els.panel.hidden; },
+    isOpen: isOpen,
     setNote: setNote,
     clearNote: clearNote,
     setSettings: setSettings,

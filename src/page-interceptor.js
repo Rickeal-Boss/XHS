@@ -315,7 +315,8 @@
 
   function post(type, payload) {
     try {
-      window.postMessage({ __channel: CHANNEL, type: type, payload: payload }, '*');
+      // 用 location.origin 而非 '*'，避免消息被转发到其他源
+      window.postMessage({ __channel: CHANNEL, type: type, payload: payload }, location.origin);
     } catch (e) { /* 忽略：不影响宿主页面 */ }
   }
 
@@ -562,6 +563,7 @@
 
   window.addEventListener('message', function (ev) {
     if (ev.source !== window) return;
+    if (ev.origin !== location.origin) return;
     var d = ev.data;
     if (!d || d.__channel !== CHANNEL) return;
     if (d.type === 'REQUEST_RESCAN') {

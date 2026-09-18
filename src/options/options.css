@@ -1,5 +1,8 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* 带 display 声明的元素会让 hidden 属性失效，这里统一兜底 */
+[hidden] { display: none !important; }
+
 :root {
   --red: #ff2442;
   --red-hover: #ff3d57;

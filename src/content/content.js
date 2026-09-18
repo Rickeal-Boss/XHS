@@ -287,6 +287,7 @@
 
   window.addEventListener('message', function (ev) {
     if (ev.source !== window) return;
+    if (ev.origin !== location.origin) return;
     var d = ev.data;
     if (!d || d.__channel !== CHANNEL) return;
 
@@ -333,7 +334,7 @@
   });
 
   function requestRescan() {
-    window.postMessage({ __channel: CHANNEL, type: 'REQUEST_RESCAN' }, '*');
+    window.postMessage({ __channel: CHANNEL, type: 'REQUEST_RESCAN' }, location.origin);
   }
 
   /* ========================= 下载 ========================= */
