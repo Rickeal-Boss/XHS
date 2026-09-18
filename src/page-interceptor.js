@@ -1,0 +1,614 @@
+/**
+ * 小红书下载助手 — 页面世界（MAIN world）拦截与提取引擎
+ * ------------------------------------------------------------------
+ * 运行环境：content_scripts，world: "MAIN"，run_at: "document_start"
+ *
+ * 设计原则（吸取开源方案教训）：
+ *   1. 只包裹 XHR / fetch 用于「读 JSON」，绝不 clone 媒体（video/image）响应，
+ *      否则会把整段视频缓冲进内存，拖垮甚至阻断播放。
+ *   2. 所有拦截逻辑用 try/catch 包裹，任何异常都不能影响宿主页面。
+ *   3. 拦截器只在 document_start 注入一次，幂等保护。
+ *   4. 数据来源三级降级：__INITIAL_STATE__ → 页面自身 API 响应 → performance 资源条目。
+ *
+ * 之所以能做到「零签名」：扩展运行在真实浏览器会话内，页面自己会带着
+ * 合法的 x-s / x-t 签名去请求 /api/sns/web/v1/feed，我们只需旁路监听即可，
+ * 完全不需要逆向小红书的签名算法。
+ */
+(function () {
+  'use strict';
+
+  var FLAG = '__XHS_DL_INTERCEPTOR__';
+  if (window[FLAG]) return;
+  window[FLAG] = true;
+
+  /* ============================ 常量 ============================ */
+
+  var CHANNEL = 'xhs-dl';
+
+  /** 图片 CDN 基础域名（原图需换域名重拼） */
+  var IMG_BASES = [
+    'https://sns-img-hw.xhscdn.net/',
+    'https://sns-img-bd.xhscdn.com/',
+    'https://sns-img-qc.xhscdn.com/',
+    'https://ci.xiaohongshu.com/'
+  ];
+
+  /** 视频 CDN 基础域名（原画质需换域名重拼） */
+  var VIDEO_BASES = [
+    'https://sns-video-hw.xhscdn.com/',
+    'https://sns-video-bd.xhscdn.com/',
+    'https://sns-video-al.xhscdn.com/'
+  ];
+
+  /** 从常规图 URL 中提取 fileKey，用于拼接原图地址 */
+  var FILE_KEY_RE = /(?<=\/)(?:spectrum\/)?(?:(?:note_pre_post_uhdr|notes_pre_post|notes_uhdr)\/)?[A-Za-z0-9\-]+(?=!)/;
+
+  /** 原图转 jpg 的处理参数 */
+  var JPG_PARAMS = '?imageView2/2/w/format/jpg';
+
+  /** 需要旁路监听的 JSON API 路径白名单 */
+  var API_HINTS = [
+    '/api/sns/',
+    'homefeed',
+    '/note/',
+    '/feed',
+    'note_detail',
+    '/v1/feed',
+    '/v0/note'
+  ];
+
+  /** 明确的非 JSON 路径，直接跳过 */
+  var BINARY_HINTS = ['.mp4', '.webm', '.m3u8', '.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.mov'];
+
+  var MAX_DEPTH = 12;
+  var MAX_NODES = 20000;
+
+  /* ========================= 基础工具函数 ========================= */
+
+  function isObj(v) {
+    return v !== null && typeof v === 'object';
+  }
+
+  /**
+   * 兼容 snake_case / camelCase 的取值。get(note, 'note_id') 可命中 noteId。
+   */
+  function get(obj, name) {
+    if (!isObj(obj)) return undefined;
+    var v = obj[name];
+    if (v !== undefined && v !== null) return v;
+    var camel = name.replace(/_([a-z0-9])/g, function (_, c) { return c.toUpperCase(); });
+    if (camel !== name) {
+      v = obj[camel];
+      if (v !== undefined && v !== null) return v;
+    }
+    return undefined;
+  }
+
+  function str(v) {
+    if (typeof v === 'string') return v;
+    if (typeof v === 'number') return String(v);
+    return '';
+  }
+
+  function num(v) {
+    if (typeof v === 'number' && isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '' && isFinite(Number(v))) return Number(v);
+    return 0;
+  }
+
+  function pickBase(bases) {
+    return bases[Math.floor(Math.random() * bases.length)];
+  }
+
+  /** 当前笔记 id（从 URL 推断） */
+  function currentNoteId() {
+    try {
+      var m = location.pathname.match(/\/(?:explore|discovery\/item)\/([0-9a-zA-Z]+)/);
+      return m ? m[1] : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function isApiUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+    var lower = url.toLowerCase();
+    if (lower.indexOf('xiaohongshu.com') === -1) return false;
+    for (var i = 0; i < BINARY_HINTS.length; i++) {
+      if (lower.indexOf(BINARY_HINTS[i]) !== -1) return false;
+    }
+    for (var j = 0; j < API_HINTS.length; j++) {
+      if (lower.indexOf(API_HINTS[j]) !== -1) return true;
+    }
+    return false;
+  }
+
+  /* ========================== 数据提取 ========================== */
+
+  /**
+   * 从 stream 对象中按编解码器优先级取一个可播放地址。
+   * 默认优先 h264：兼容性最好，本地播放器/剪辑软件都能直接打开。
+   */
+  function streamUrl(stream, order) {
+    if (!isObj(stream)) return '';
+    order = order || ['h264', 'h265', 'h266', 'av1'];
+    for (var i = 0; i < order.length; i++) {
+      var arr = stream[order[i]];
+      if (Array.isArray(arr) && arr.length) {
+        for (var k = 0; k < arr.length; k++) {
+          var item = arr[k];
+          if (!isObj(item)) continue;
+          var u = str(get(item, 'master_url'));
+          if (!u) {
+            var backups = get(item, 'backup_urls');
+            if (Array.isArray(backups) && backups.length) u = str(backups[0]);
+          }
+          if (u) return u;
+        }
+      }
+    }
+    return '';
+  }
+
+  function coverUrl(cover) {
+    if (typeof cover === 'string') return cover;
+    if (!isObj(cover)) return '';
+    return str(get(cover, 'url_default')) || str(get(cover, 'urlDefault')) ||
+      str(get(cover, 'url')) || str(get(cover, 'url_pre')) || '';
+  }
+
+  /** 常规图 URL → 原图 URL（换 CDN 域名 + 保留 fileKey，去掉压缩处理参数） */
+  function buildOriginImage(urlDefault) {
+    if (!urlDefault || typeof urlDefault !== 'string') return '';
+    var clean = urlDefault.split('?')[0];
+    var m = clean.match(FILE_KEY_RE);
+    if (!m || !m[0]) return '';
+    return pickBase(IMG_BASES) + m[0];
+  }
+
+  /** 原视频直链：origin_video_key 是小红书自己提供的「原画质」入口 */
+  function buildOriginVideo(key) {
+    if (!key) return '';
+    return pickBase(VIDEO_BASES) + key;
+  }
+
+  /**
+   * 把任意形态的 note 对象归一化成统一的 NoteData。
+   * 同时兼容 __INITIAL_STATE__ 的 camelCase 与 API 的 snake_case。
+   */
+  function toNoteData(raw, source) {
+    if (!isObj(raw)) return null;
+
+    var noteId = str(get(raw, 'note_id')) || str(get(raw, 'id'));
+    if (!noteId) return null;
+
+    var user = get(raw, 'user') || get(raw, 'author') || {};
+    var videoRaw = get(raw, 'video');
+
+    var data = {
+      noteId: noteId,
+      source: source || 'unknown',
+      url: 'https://www.xiaohongshu.com/explore/' + noteId,
+      title: str(get(raw, 'title')) || str(get(raw, 'display_title')),
+      desc: str(get(raw, 'desc')) || str(get(raw, 'description')),
+      type: str(get(raw, 'type')) || (videoRaw ? 'video' : 'normal'),
+      publishTime: num(get(raw, 'time')) || num(get(raw, 'publish_time')) || num(get(raw, 'last_update_time')),
+      ipLocation: str(get(raw, 'ip_location')),
+      cover: coverUrl(get(raw, 'cover')),
+      author: {
+        nickname: str(get(user, 'nickname')) || str(get(user, 'nick_name')) || str(get(user, 'name')),
+        userId: str(get(user, 'user_id')) || str(get(user, 'id')),
+        redId: str(get(user, 'red_id')),
+        avatar: str(get(user, 'avatar')) || str(get(user, 'image'))
+      },
+      images: [],
+      video: null
+    };
+
+    if (data.type !== 'video' && data.type !== 'normal') data.type = 'normal';
+
+    /* ---- 图片列表（图文 / 实况） ---- */
+    var imageList = get(raw, 'image_list');
+    if (!Array.isArray(imageList)) imageList = [];
+    for (var i = 0; i < imageList.length; i++) {
+      var img = imageList[i];
+      if (!isObj(img)) continue;
+      var urlDefault = str(get(img, 'url_default')) || str(get(img, 'url')) || str(get(img, 'url_pre'));
+      var liveVideo = streamUrl(get(img, 'stream'), ['h264', 'h265', 'av1']);
+      data.images.push({
+        index: i,
+        urlDefault: urlDefault,
+        urlOrigin: buildOriginImage(urlDefault),
+        urlJpg: buildOriginImage(urlDefault) ? buildOriginImage(urlDefault) + JPG_PARAMS : '',
+        liveVideoUrl: liveVideo,
+        isLive: !!liveVideo || !!get(img, 'live_photo'),
+        width: num(get(img, 'width')),
+        height: num(get(img, 'height'))
+      });
+    }
+
+    /* ---- 视频 ---- */
+    if (videoRaw && isObj(videoRaw)) {
+      var consumer = get(videoRaw, 'consumer') || {};
+      var media = get(videoRaw, 'media') || {};
+      var originKey = str(get(consumer, 'origin_video_key'));
+      var vStream = streamUrl(get(media, 'stream'), ['h264', 'h265', 'av1']);
+      data.video = {
+        urlOrigin: buildOriginVideo(originKey),
+        originKey: originKey,
+        urlStream: vStream,
+        cover: coverUrl(get(videoRaw, 'cover')) || coverUrl(get(media, 'video_cover')) || data.cover,
+        duration: num(get(videoRaw, 'capa') ? get(get(videoRaw, 'capa'), 'duration') : 0) ||
+          num(get(media, 'video_duration')) || num(get(videoRaw, 'duration'))
+      };
+    }
+
+    if (!data.title) data.title = data.desc ? data.desc.slice(0, 40) : ('小红书笔记_' + noteId);
+    return data;
+  }
+
+  /* ====================== 深度扫描 JSON 树 ====================== */
+
+  function collectNotes(root, bag, stats) {
+    var stack = [{ node: root, depth: 0 }];
+    while (stack.length) {
+      var cur = stack.pop();
+      var node = cur.node;
+      if (!isObj(node)) continue;
+      if (stats.visited++ > MAX_NODES) break;
+      if (cur.depth > MAX_DEPTH) continue;
+
+      if (Array.isArray(node)) {
+        for (var a = 0; a < node.length; a++) {
+          if (isObj(node[a])) stack.push({ node: node[a], depth: cur.depth + 1 });
+        }
+        continue;
+      }
+
+      // 形态一：feed API 的 items[].note_card
+      var card = get(node, 'note_card');
+      if (isObj(card)) pushNote(card, bag);
+
+      // 形态二：noteDetailMap[id].note / 直接的 note 对象
+      var detailMap = get(node, 'note_detail_map');
+      if (isObj(detailMap)) {
+        for (var key in detailMap) {
+          if (!Object.prototype.hasOwnProperty.call(detailMap, key)) continue;
+          var entry = detailMap[key];
+          if (isObj(entry) && isObj(get(entry, 'note'))) pushNote(get(entry, 'note'), bag);
+        }
+      }
+
+      // 形态三：自身就是一条笔记
+      if (get(node, 'note_id') && (get(node, 'image_list') || get(node, 'video') || get(node, 'desc'))) {
+        pushNote(node, bag);
+      }
+
+      for (var k in node) {
+        if (!Object.prototype.hasOwnProperty.call(node, k)) continue;
+        var v = node[k];
+        if (isObj(v)) stack.push({ node: v, depth: cur.depth + 1 });
+      }
+    }
+  }
+
+  function pushNote(raw, bag) {
+    var data = toNoteData(raw, 'api');
+    if (!data) return;
+    var prev = bag[data.noteId];
+    if (!prev) {
+      bag[data.noteId] = data;
+      return;
+    }
+    // 同一条笔记出现多次时，保留信息更完整的那一份
+    var score = function (d) {
+      return d.images.length * 10 + (d.video ? 100 : 0) +
+        d.images.filter(function (i) { return i.liveVideoUrl; }).length * 50;
+    };
+    if (score(data) > score(prev)) {
+      data.source = prev.source === 'initial-state' ? prev.source : data.source;
+      bag[data.noteId] = data;
+    }
+  }
+
+  /* ========================= 对外投递 ========================= */
+
+  function post(type, payload) {
+    try {
+      window.postMessage({ __channel: CHANNEL, type: type, payload: payload }, '*');
+    } catch (e) { /* 忽略：不影响宿主页面 */ }
+  }
+
+  function emitNotes(rawRoot, source) {
+    var bag = Object.create(null);
+    var stats = { visited: 0 };
+    try {
+      collectNotes(rawRoot, bag, stats);
+    } catch (e) {
+      return;
+    }
+    var notes = Object.keys(bag).map(function (k) { return bag[k]; });
+    if (!notes.length) return;
+
+    // 优先投递当前 URL 对应的笔记
+    var want = currentNoteId();
+    var picked = null;
+    for (var i = 0; i < notes.length; i++) {
+      notes[i].source = source;
+      if (want && notes[i].noteId === want) picked = notes[i];
+    }
+    if (!picked) {
+      // 没有 URL 匹配时，取信息量最大的一条（通常是用户当前在看的那条）
+      picked = notes.reduce(function (a, b) {
+        var s = function (d) { return d.images.length + (d.video ? 100 : 0); };
+        return s(b) > s(a) ? b : a;
+      }, notes[0]);
+    }
+    post('NOTE', picked);
+  }
+
+  /* ======================= __INITIAL_STATE__ ======================= */
+
+  function scanInitialState(reason) {
+    try {
+      var state = window.__INITIAL_STATE__;
+      if (!state) return false;
+      emitNotes(state, 'initial-state');
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** 兜底：从 <script> 内联文本里正则抠出 __INITIAL_STATE__ */
+  function scanInlineScript() {
+    try {
+      var scripts = document.querySelectorAll('script');
+      for (var i = 0; i < scripts.length; i++) {
+        var text = scripts[i].textContent;
+        if (!text || text.indexOf('__INITIAL_STATE__') === -1) continue;
+        if (text.length > 3000000) continue; // 防御性上限
+        var m = text.match(/__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})\s*;?\s*(?:<\/script>|$)/);
+        if (!m) continue;
+        // 内联 JSON 里可能含 undefined，替换后才能 parse
+        var json = m[1].replace(/:\s*undefined\b/g, ':null');
+        try {
+          emitNotes(JSON.parse(json), 'inline-script');
+        } catch (e) { /* 单个 script 解析失败不影响其他 */ }
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+
+  /* ================== 原生伪装 & 可降级钩子管理 ================== */
+  /**
+   * R1 加固：抖音已被证实会检测 window.fetch / XHR 是否为原生实现，
+   * 一旦发现被包裹就直接禁用 MSE 视频轨（表现为「只有声音没有画面」）。
+   * 小红书没有公开案例，但同类检测成本极低，因此：
+   *   ① 让被包裹的函数 toString() 仍返回原生代码字符串；
+   *   ② 钩子可运行时卸载（uninstallHooks）；
+   *   ③ 一旦宿主 <video> 出现加载错误，立刻自动卸载钩子。
+   * 宁可少抓数据，也绝不影响用户正常看视频。
+   */
+  var hooks = { installed: false, originals: null };
+
+  function maskNative(fake, original) {
+    try {
+      Object.defineProperty(fake, 'name', { value: original.name, configurable: true });
+      Object.defineProperty(fake, 'length', { value: original.length, configurable: true });
+      Object.defineProperty(fake, 'toString', {
+        value: function () { return Function.prototype.toString.call(original); },
+        configurable: true,
+        writable: true
+      });
+    } catch (e) { /* 部分环境下不可配置，忽略即可 */ }
+  }
+
+  function uninstallHooks(reason) {
+    if (!hooks.installed) return;
+    var o = hooks.originals || {};
+    try {
+      if (o.xhrOpen) window.XMLHttpRequest.prototype.open = o.xhrOpen;
+      if (o.xhrSend) window.XMLHttpRequest.prototype.send = o.xhrSend;
+      if (o.fetch) window.fetch = o.fetch;
+    } catch (e) { /* 忽略 */ }
+    hooks.installed = false;
+    post('HOOK_DISABLED', { reason: reason || 'manual' });
+  }
+
+  /* ================== PerformanceObserver（媒体 URL 主路径） ================== */
+  /**
+   * 与 XHR/fetch 钩子不同，PerformanceObserver 是纯被动观察，零侵入、
+   * 不可能被检测，因此把它作为媒体 URL 的**主路径**，钩子只作增强。
+   */
+  var mediaSink = { videos: [], seen: Object.create(null) };
+  var hintTimer = null;
+
+  function noteMediaUrl(u) {
+    if (!u || typeof u !== 'string' || mediaSink.seen[u]) return;
+    var path = u.split('?')[0].toLowerCase();
+    var isVideo = /\.(mp4|webm|m3u8|mov|m4v)$/.test(path) || u.indexOf('sns-video') !== -1;
+    if (!isVideo) return;
+    mediaSink.seen[u] = 1;
+    mediaSink.videos.push(u);
+    if (mediaSink.videos.length > 80) mediaSink.videos.shift();
+    if (hintTimer) return;
+    hintTimer = setTimeout(function () {
+      hintTimer = null;
+      post('MEDIA_HINTS', { videos: mediaSink.videos.slice() });
+    }, 600);
+  }
+
+  function installPerformanceObserver() {
+    try {
+      if (typeof PerformanceObserver !== 'function') return;
+      var po = new PerformanceObserver(function (list) {
+        var entries = list.getEntries();
+        for (var i = 0; i < entries.length; i++) noteMediaUrl(entries[i].name);
+      });
+      po.observe({ type: 'resource', buffered: true });
+    } catch (e) { /* 忽略 */ }
+  }
+
+  /** 播放健康看门狗：宿主视频一报错就立刻撤掉钩子 */
+  function watchPlaybackHealth() {
+    document.addEventListener('error', function (ev) {
+      var t = ev.target;
+      if (!t || !t.tagName || String(t.tagName).toUpperCase() !== 'VIDEO') return;
+      if (hooks.installed) uninstallHooks('video-error');
+    }, true);
+  }
+
+  /* ====================== XHR / fetch 旁路监听 ====================== */
+
+  function handleJsonText(text, url) {
+    if (!text) return;
+    var trimmed = text.slice(0, 64).trim();
+    if (trimmed.charAt(0) !== '{' && trimmed.charAt(0) !== '[') return;
+    try {
+      emitNotes(JSON.parse(text), 'api:' + url.split('?')[0].slice(-40));
+    } catch (e) { /* 非 JSON，忽略 */ }
+  }
+
+  function installHooks() {
+    if (hooks.installed) return;
+    var originals = {};
+
+    /* ---- XMLHttpRequest ---- */
+    var XHR = window.XMLHttpRequest;
+    if (XHR && XHR.prototype) {
+      var rawOpen = XHR.prototype.open;
+      var rawSend = XHR.prototype.send;
+      originals.xhrOpen = rawOpen;
+      originals.xhrSend = rawSend;
+
+      var fakeOpen = function (method, url) {
+        try {
+          this.__xhsDlUrl = typeof url === 'string' ? url : (url && url.toString ? url.toString() : '');
+        } catch (e) { /* 忽略 */ }
+        return rawOpen.apply(this, arguments);
+      };
+
+      var fakeSend = function () {
+        try {
+          var self = this;
+          self.addEventListener('load', function () {
+            try {
+              var url = self.__xhsDlUrl || '';
+              if (!isApiUrl(url)) return;
+              // 只看 JSON：非 JSON 响应（二进制媒体）直接放弃，避免无谓的内存拷贝
+              var ct = '';
+              try { ct = self.getResponseHeader('content-type') || ''; } catch (e2) { ct = ''; }
+              var rt = self.responseType;
+              if (rt && rt !== 'text' && rt !== 'json') return;
+              if (ct && ct.indexOf('json') === -1 && ct.indexOf('text') === -1) return;
+              handleJsonText(self.responseText, url);
+            } catch (e3) { /* 忽略 */ }
+          }, { once: true });
+        } catch (e4) { /* 忽略 */ }
+        return rawSend.apply(this, arguments);
+      };
+
+      maskNative(fakeOpen, rawOpen);
+      maskNative(fakeSend, rawSend);
+      XHR.prototype.open = fakeOpen;
+      XHR.prototype.send = fakeSend;
+    }
+
+    /* ---- fetch ---- */
+    if (typeof window.fetch === 'function') {
+      var rawFetch = window.fetch;
+      originals.fetch = rawFetch;
+
+      var fakeFetch = function () {
+        var args = arguments;
+        var p = rawFetch.apply(this, args);
+        try {
+          var req = args[0];
+          var url = typeof req === 'string' ? req : (req && req.url ? req.url : '');
+          if (isApiUrl(url)) {
+            p.then(function (res) {
+              try {
+                var ct = (res.headers && res.headers.get ? res.headers.get('content-type') : '') || '';
+                ct = ct.toLowerCase();
+                // 关键：只对 JSON / text 做 clone，媒体流一律不碰
+                if (ct.indexOf('json') !== -1 || ct.indexOf('text') !== -1) {
+                  res.clone().text().then(function (t) {
+                    handleJsonText(t, url);
+                  }).catch(function () {});
+                }
+              } catch (e) { /* 忽略 */ }
+            }).catch(function () {});
+          }
+        } catch (e) { /* 忽略 */ }
+        return p;
+      };
+
+      maskNative(fakeFetch, rawFetch);
+      window.fetch = fakeFetch;
+    }
+
+    hooks.originals = originals;
+    hooks.installed = true;
+  }
+
+  /* ======================== 消息桥（请求-响应） ======================== */
+
+  function respondRescan() {
+    var ok = scanInitialState('rescan');
+    if (!ok) scanInlineScript();
+    post('MEDIA_HINTS', { videos: mediaSink.videos.slice() });
+    post('RESCAN_DONE', { noteId: currentNoteId(), ok: ok, hookActive: hooks.installed });
+  }
+
+  window.addEventListener('message', function (ev) {
+    if (ev.source !== window) return;
+    var d = ev.data;
+    if (!d || d.__channel !== CHANNEL) return;
+    if (d.type === 'REQUEST_RESCAN') {
+      respondRescan();
+    } else if (d.type === 'SET_HOOK') {
+      try {
+        if (d.payload && d.payload.enabled) installHooks();
+        else uninstallHooks('settings');
+      } catch (e) { /* 忽略 */ }
+      post('HOOK_STATE', { active: hooks.installed });
+    }
+  });
+
+  /* ============================ 启动 ============================ */
+
+  // 纯被动的观察器永远启用（零侵入，不可能被检测）
+  installPerformanceObserver();
+  watchPlaybackHealth();
+
+  // 网络钩子按需启用，默认开启；隔离世界可随时通过 SET_HOOK 关闭
+  try { installHooks(); } catch (e) { /* 钩子失败也不阻断后续 */ }
+
+  // 多时机扫描：SPA 页面状态注入时机不确定，覆盖全生命周期
+  scanInitialState('document-start');
+  scanInlineScript();
+
+  document.addEventListener('DOMContentLoaded', function () {
+    scanInitialState('domcontentloaded');
+    if (!scanInitialState('domcontentloaded-2')) scanInlineScript();
+  }, { once: true });
+
+  window.addEventListener('load', function () {
+    scanInitialState('load');
+  }, { once: true });
+
+  setTimeout(function () { scanInitialState('delay-1500'); }, 1500);
+  setTimeout(function () { scanInitialState('delay-4000'); scanInlineScript(); }, 4000);
+
+  // SPA 路由切换：URL 变化后重新扫描
+  var lastHref = location.href;
+  setInterval(function () {
+    if (location.href !== lastHref) {
+      lastHref = location.href;
+      setTimeout(function () {
+        scanInitialState('route-change');
+        post('ROUTE_CHANGE', { noteId: currentNoteId() });
+      }, 800);
+    }
+  }, 1000);
+})();

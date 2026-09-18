@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>小红书下载助手</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="hd">
+    <div class="hd-brand">
+      <span class="dot"></span>
+      <span>小红书下载助手</span>
+    </div>
+    <button id="btnOptions" class="icon" title="打开设置" aria-label="打开设置">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+  </header>
+
+  <main id="main">
+    <div id="loading" class="state">
+      <div class="spinner"></div>
+      <p>正在读取当前笔记…</p>
+    </div>
+
+    <div id="unsupported" class="state" hidden>
+      <p class="big">当前页面不支持</p>
+      <p class="sub">请先打开一篇小红书笔记详情页，<br>再点击本扩展图标。</p>
+    </div>
+
+    <div id="ready" hidden>
+      <div class="note">
+        <img id="cover" class="cover" alt="">
+        <div class="note-info">
+          <p id="title" class="title"></p>
+          <p id="author" class="author"></p>
+          <p id="stats" class="stats"></p>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="btnAll" class="btn">下载本笔记全部</button>
+        <button id="btnPanel" class="btn ghost">在页面中挑选…</button>
+      </div>
+
+      <p id="hint" class="hint"></p>
+    </div>
+  </main>
+
+  <footer class="ft">
+    <span id="version"></span>
+    <span class="sep">·</span>
+    <span>非官方扩展，仅供个人学习备份</span>
+  </footer>
+
+  <script src="../content/downloader.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

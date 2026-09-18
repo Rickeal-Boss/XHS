@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>小红书下载助手 · 设置</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="page">
+    <header class="hd">
+      <h1>小红书下载助手 · 设置</h1>
+      <p class="sub">修改后自动保存，页面无需刷新即刻生效。</p>
+    </header>
+
+    <!-- ------------------------- 命名规则 ------------------------- -->
+    <section class="card">
+      <h2>文件命名</h2>
+      <p class="desc">点击下方占位符即可插入到模板中。</p>
+
+      <label class="field">
+        <span class="label">命名模板</span>
+        <input id="nameRule" type="text" spellcheck="false">
+      </label>
+
+      <div id="chips" class="chips"></div>
+
+      <label class="field">
+        <span class="label">时间格式</span>
+        <input id="timeFormat" type="text" spellcheck="false">
+      </label>
+
+      <div class="preview">
+        <span class="preview-label">效果预览</span>
+        <code id="preview">—</code>
+      </div>
+    </section>
+
+    <!-- ------------------------- 画质 ------------------------- -->
+    <section class="card">
+      <h2>图片</h2>
+      <div class="radios" id="imageFormat">
+        <label><input type="radio" name="imageFormat" value="origin"><span><b>原图</b><i>换 CDN 域名重拼原图直链，无损、体积最大（推荐）</i></span></label>
+        <label><input type="radio" name="imageFormat" value="default"><span><b>常规图</b><i>页面展示用的压缩图，体积小</i></span></label>
+        <label><input type="radio" name="imageFormat" value="jpg"><span><b>强制 JPG</b><i>原图转 JPG 输出，兼容性最好</i></span></label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>视频</h2>
+      <div class="radios" id="videoQuality">
+        <label><input type="radio" name="videoQuality" value="origin"><span><b>原画质</b><i>使用 origin_video_key 直链，码率最高（推荐）</i></span></label>
+        <label><input type="radio" name="videoQuality" value="default"><span><b>常规流</b><i>使用页面播放用的 H.264 流，兼容性最好</i></span></label>
+      </div>
+    </section>
+
+    <!-- ------------------------- 实况 ------------------------- -->
+    <section class="card">
+      <h2>实况照片（Live Photo）</h2>
+      <p class="desc">实况 = 一张静态图 + 一段配套短视频。短视频不在图片直链里，丢失后很难找回，默认一并下载。</p>
+      <div class="radios" id="liveMode">
+        <label><input type="radio" name="liveMode" value="both"><span><b>图片 + 实况视频</b><i>成对下载，视频以 _live 结尾，便于配对排序（推荐）</i></span></label>
+        <label><input type="radio" name="liveMode" value="video-only"><span><b>仅实况视频</b><i>只要动态部分</i></span></label>
+        <label><input type="radio" name="liveMode" value="image-only"><span><b>仅静态图片</b><i>当普通图文处理</i></span></label>
+      </div>
+    </section>
+
+    <!-- ------------------------- 目录 ------------------------- -->
+    <section class="card">
+      <h2>保存位置</h2>
+      <label class="field">
+        <span class="label">根目录（相对浏览器下载目录）</span>
+        <input id="baseDir" type="text" spellcheck="false" placeholder="留空则直接存到下载目录">
+      </label>
+      <label class="switch">
+        <input id="dirByAuthor" type="checkbox">
+        <span>按作者昵称建子目录</span>
+      </label>
+      <label class="switch">
+        <input id="dirByTitle" type="checkbox">
+        <span>按笔记标题建子目录</span>
+      </label>
+      <p class="desc">路径过长会被自动截断，以兼容 Windows 的 260 字符上限。</p>
+    </section>
+
+    <!-- ------------------------- 高级 ------------------------- -->
+    <section class="card">
+      <h2>高级</h2>
+      <label class="switch">
+        <input id="hookEnabled" type="checkbox">
+        <span>启用网络监听（默认开启）</span>
+      </label>
+      <p class="desc">
+        扩展需要旁路监听页面自身发出的数据请求才能拿到完整的媒体信息。
+        若你发现页面视频播放异常，可关闭此项并刷新页面——
+        扩展会退化为仅使用页面元素与资源时序提取，功能略有减弱但完全无侵入。
+      </p>
+    </section>
+
+    <!-- ------------------------- 重置 ------------------------- -->
+    <section class="card">
+      <h2>维护</h2>
+      <div class="row">
+        <button id="btnReset" class="btn ghost">恢复默认设置</button>
+        <button id="btnClear" class="btn ghost">清空已下载记录</button>
+      </div>
+      <p class="desc" id="status"></p>
+    </section>
+
+    <footer class="ft">
+      <p>本扩展为个人学习用途的非官方工具，与小红书官方无关。</p>
+      <p>请仅下载你有权访问和保存的内容，尊重原作者版权。</p>
+    </footer>
+  </div>
+
+  <script src="../content/downloader.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>
