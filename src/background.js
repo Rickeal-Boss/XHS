@@ -52,9 +52,20 @@ function isDownloadableUrl(u) {
 
 /* ========================= 路径 / 文件名 ========================= */
 
+/**
+ * 需要替换掉的字符：
+ *   - ASCII 非法字符 \ / : * ? " < > |
+ *   - 控制字符
+ *   - Unicode 里外形酷似「路径分隔符」的字符（／＼．․∕⁄⧸），
+ *     防止某些平台的 NFC/NFKC 规范化把它们折叠成真分隔符后造成路径穿越。
+ *     注意不含全角冒号「：」等中文常用标点 —— 它们不是分隔符，
+ *     替换掉只会让中文文件名变得难看。
+ */
+var ILLEGAL_RE = /[\\/:*?"<>|\u0000-\u001f\u007f\uFF0F\uFF3C\uFF0E\u2024\u2215\u2044\u29F8]/g;
+
 function sanitizeSegment(seg) {
   var out = String(seg == null ? '' : seg)
-    .replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_')  // 非法字符
+    .replace(ILLEGAL_RE, '_')
     .replace(/\s+/g, ' ')
     .replace(/^[.\s]+/, '')                              // 开头点/空格
     .replace(/[.\s]+$/, '');                             // 结尾点/空格（Windows 禁用）

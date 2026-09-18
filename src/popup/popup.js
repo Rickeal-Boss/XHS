@@ -16,14 +16,20 @@
 
   function $(id) { return document.getElementById(id); }
 
-  function withActiveTab(fn) {
+  /**
+   * 向当前标签页的内容脚本发消息。
+   * msgType 必须由调用方显式传入 —— 早先这里把类型写死成 GET_NOTE，
+   * 导致「下载本笔记全部」实际只是重新取了一次笔记数据，
+   * DOWNLOAD_ALL 分支永远不会被触发（按钮点了不下载任何东西）。
+   */
+  function sendToTab(msgType, cb) {
     chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
       var tab = tabs && tabs[0];
-      if (!tab || tab.id == null) { fn(null); return; }
-      chrome.tabs.sendMessage(tab.id, { type: 'GET_NOTE' }, function (resp) {
+      if (!tab || tab.id == null) { if (cb) cb(null, null); return; }
+      chrome.tabs.sendMessage(tab.id, { type: msgType }, function (resp) {
         // 内容脚本未注入（非小红书页面）时会走这里
         void chrome.runtime.lastError;
-        fn(resp || null, tab.id);
+        if (cb) cb(resp || null, tab.id);
       });
     });
   }
@@ -97,7 +103,7 @@
       updateHint();
     });
 
-    withActiveTab(function (resp) {
+    sendToTab('GET_NOTE', function (resp) {
       if (resp && resp.ok && resp.note) {
         renderNote(resp.note);
       } else {
@@ -109,7 +115,7 @@
       if (!note) return;
       els.btnAll.disabled = true;
       els.btnAll.textContent = '已提交下载…';
-      withActiveTab(function (resp, tabId) {
+      sendToTab('DOWNLOAD_ALL', function (resp) {
         if (!resp || !resp.ok) {
           els.btnAll.disabled = false;
           els.btnAll.textContent = '下载失败，请在页面中重试';
@@ -120,12 +126,7 @@
     });
 
     els.btnPanel.addEventListener('click', function () {
-      withActiveTab(function (resp, tabId) {
-        if (tabId != null) {
-          chrome.tabs.sendMessage(tabId, { type: 'OPEN_PANEL' }, function () {
-            void chrome.runtime.lastError;
-          });
-        }
+      sendToTab('OPEN_PANEL', function () {
         window.close();
       });
     });

@@ -74,7 +74,10 @@ var XHS_DL_DOWNLOADER = (function () {
   function sanitize(name) {
     if (!name) return '';
     var s = String(name)
-      .replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_')   // 非法字符
+      // 非法字符 + 控制字符 + 全角/数学符号里形似「路径分隔符」的字符
+      // 注意：不替换全角冒号「：」等中文常用标点 —— 它们不是分隔符，
+      // 替换掉只会让中文标题变得难看（形似分隔符的 ／＼．․ 才必须拦）
+      .replace(/[\\/:*?"<>|\u0000-\u001f\u007f\uFF0F\uFF3C\uFF0E\u2024\u2215\u2044\u29F8]/g, '_')
       .replace(/[\r\n\t]+/g, ' ')                          // 换行制表
       .replace(/\s{2,}/g, ' ')                             // 连续空白
       .replace(/^[.\s]+|[.\s]+$/g, '');                    // 首尾点与空格
@@ -143,12 +146,17 @@ var XHS_DL_DOWNLOADER = (function () {
    */
   function buildTasks(note, selectedIndexes, settings) {
     var tasks = [];
+    if (!note || typeof note !== 'object') return tasks;
+
+    var sel = Array.isArray(selectedIndexes) ? selectedIndexes : [];
+    var images = Array.isArray(note.images) ? note.images : [];
     var dir = buildDir(note, settings);
     var rule = (settings && settings.nameRule) || DEFAULT_RULE;
+    var liveMode = (settings && settings.liveMode) || 'both';
     var seq = 0;
 
     // 视频笔记：视频排在最前
-    if (note.video && selectedIndexes.indexOf(-1) !== -1) {
+    if (note.video && sel.indexOf(-1) !== -1) {
       var vurl = '';
       if (settings && settings.videoQuality === 'origin') {
         vurl = note.video.urlOrigin || note.video.urlStream;
@@ -170,35 +178,45 @@ var XHS_DL_DOWNLOADER = (function () {
       }
     }
 
-    note.images.forEach(function (img) {
-      if (selectedIndexes.indexOf(img.index) === -1) return;
+    images.forEach(function (img) {
+      if (!img || sel.indexOf(img.index) === -1) return;
       seq++;
       var base = sanitize(renderName(rule, buildVars(note, seq, settings))) || ('image_' + img.index);
-      var fmt = (settings && settings.imageFormat) || 'origin';
 
-      var url = '';
-      var ext = '.jpg';
-      if (fmt === 'origin') {
-        url = img.urlOrigin || img.urlDefault;
-        ext = guessExt(url, '.jpg') === '.webp' ? '.jpg' : guessExt(url, '.jpg');
-      } else if (fmt === 'default') {
-        url = img.urlDefault;
-        ext = guessExt(url, '.jpg');
-      } else if (fmt === 'jpg') {
-        url = img.urlJpg || img.urlOrigin || img.urlDefault;
-        ext = '.jpg';
+      // 「仅实况视频」时不应再产出静态图任务，否则设置项名不副实
+      var wantImage = liveMode !== 'video-only';
+      var wantLive = liveMode !== 'image-only' && !!img.liveVideoUrl;
+
+      if (wantImage) {
+        var fmt = (settings && settings.imageFormat) || 'origin';
+        var url = '';
+        var ext = '.jpg';
+        if (fmt === 'origin') {
+          url = img.urlOrigin || img.urlDefault;
+          ext = guessExt(url, '.jpg') === '.webp' ? '.jpg' : guessExt(url, '.jpg');
+        } else if (fmt === 'default') {
+          url = img.urlDefault;
+          ext = guessExt(url, '.jpg');
+        } else if (fmt === 'jpg') {
+          url = img.urlJpg || img.urlOrigin || img.urlDefault;
+          ext = '.jpg';
+        }
+        if (url) {
+          tasks.push({
+            kind: 'image',
+            url: url,
+            dir: dir,
+            name: base + ext,
+            live: false,
+            fallbacks: [img.urlOrigin, img.urlDefault, img.urlJpg].filter(function (u, i, a) {
+              return u && u !== url && a.indexOf(u) === i;
+            })
+          });
+        }
       }
-      if (!url) return;
 
-      var fallbacks = [img.urlOrigin, img.urlDefault, img.urlJpg].filter(function (u, i, a) {
-        return u && u !== url && a.indexOf(u) === i;
-      });
-
-      tasks.push({ kind: 'image', url: url, dir: dir, name: base + ext, fallbacks: fallbacks, live: false });
-
-      // 实况照片：配套视频按用户设置决定是否一并下载
-      var liveMode = (settings && settings.liveMode) || 'both';
-      if (img.liveVideoUrl && liveMode !== 'image-only') {
+      // 实况照片配套短视频：与静态图同序号、加 _live 后缀，便于配对排序
+      if (wantLive) {
         tasks.push({
           kind: 'live',
           url: img.liveVideoUrl,

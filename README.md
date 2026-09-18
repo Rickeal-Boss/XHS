@@ -167,9 +167,31 @@
 │   │   └── styles.js          注入样式
 │   ├── popup/                 工具栏弹窗
 │   └── options/               设置页
+├── tests/                     Node 单元测试（零依赖，直接 node 运行）
 └── tools/
-    └── make_icons.py          图标生成脚本（零依赖）
+    ├── make_icons.py          图标生成脚本（零依赖）
+    ├── make_preview.py        生成自包含的 UI 预览页
+    ├── diag_panel.py          面板显隐诊断（无头 Edge）
+    └── shot_options.py        设置页渲染截图（无头 Edge）
 ```
+
+### 运行测试
+
+```bash
+node tests/test-downloader.js
+node tests/test-background.js
+node tests/test-extractor.js
+```
+
+全部为纯 Node 脚本，不需要安装任何依赖。
+
+### 生成 UI 预览
+
+```bash
+python tools/make_preview.py
+```
+
+会产出一个自包含的 HTML，直接复用扩展的真实源码渲染面板与 Popup，可在浏览器中打开查看效果。
 
 ---
 
