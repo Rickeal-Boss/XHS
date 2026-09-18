@@ -115,7 +115,8 @@ var XHS_DL_UI = (function () {
       '    <button class="xhs-dl-btn is-ghost" data-act="export-json">导出元数据</button>',
       '  </div>',
       '  <div class="xhs-dl-progress"><div class="xhs-dl-bar"><i></i></div>',
-      '    <div class="xhs-dl-progress-text"><span></span><span></span></div></div>',
+      '    <div class="xhs-dl-progress-text"><span></span><span></span></div>',
+      '    <button class="xhs-dl-cancel" data-act="cancel" type="button">取消</button></div>',
       '</div>'
     ].join('');
 
@@ -130,6 +131,7 @@ var XHS_DL_UI = (function () {
     els.progNum = els.panel.querySelector('.xhs-dl-progress-text span:last-child');
     els.copyBtn = els.panel.querySelector('button[data-act="copy-links"]');
     els.jsonBtn = els.panel.querySelector('button[data-act="export-json"]');
+    els.cancelBtn = els.panel.querySelector('button[data-act="cancel"]');
 
     els.panel.addEventListener('click', onPanelClick);
     els.panel.addEventListener('change', function (e) {
@@ -159,6 +161,7 @@ var XHS_DL_UI = (function () {
     else if (act === 'rescan') { if (handlers.onRescan) handlers.onRescan(); }
     else if (act === 'copy-links') { if (handlers.onCopyLinks) handlers.onCopyLinks(note, selected.slice()); }
     else if (act === 'export-json') { if (handlers.onExportJson) handlers.onExportJson(note); }
+    else if (act === 'cancel') { if (handlers.onCancel) handlers.onCancel(); }
     // act === 'all' 交给 change 事件处理
   }
 
@@ -412,6 +415,8 @@ var XHS_DL_UI = (function () {
 
   function setBusy(v) {
     busy = !!v;
+    // 取消按钮只在下载进行中有意义，避免用户点了个没反应的按钮
+    if (els.cancelBtn) els.cancelBtn.classList.toggle('is-on', busy);
     renderFoot();
   }
 

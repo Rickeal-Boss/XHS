@@ -427,6 +427,29 @@ var XHS_DL_CSS = `
   min-width: 0;
 }
 
+/* 取消下载：只在下载进行中显示（由 .is-on 控制） */
+.xhs-dl-cancel { display: none; }
+.xhs-dl-cancel.is-on {
+  display: block;
+  margin-top: var(--xhs-sp-3);
+  width: 100%;
+  padding: 7px 0;
+  border-radius: var(--xhs-r-md);
+  border: 1px solid var(--xhs-line);
+  background: var(--xhs-bg);
+  color: var(--xhs-text-sub);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.xhs-dl-cancel.is-on:hover {
+  background: var(--xhs-bg-hover);
+  color: var(--xhs-text);
+  border-color: #f5c2c7;
+}
+.xhs-dl-cancel.is-on:focus-visible { outline: 2px solid var(--xhs-red); outline-offset: 1px; }
+
 /* --------------------------- Toast --------------------------- */
 .xhs-dl-toasts {
   position: fixed;

@@ -562,6 +562,20 @@
       onExportJson: function (note) {
         if (note) exportJson(note);
       },
+      // background.js 一直支持 CANCEL_BATCH，但此前没有任何入口发送它，
+      // 用户只能干等一批下载跑完。这里把能力接到 UI 上。
+      onCancel: function () {
+        try {
+          chrome.runtime.sendMessage({ type: 'CANCEL_BATCH' }, function () {
+            // 取消是尽力而为：已发出的 chrome.downloads 调用无法撤回，
+            // 只能阻止后续任务继续入队
+            if (chrome.runtime.lastError) { /* 忽略：SW 可能已被回收 */ }
+          });
+          XHS_DL_UI.toast('已请求取消，剩余任务不会再开始');
+        } catch (e) {
+          XHS_DL_UI.toast('取消失败：' + (e && e.message ? e.message : e));
+        }
+      },
       onPositionChange: function (pos) {
         try { chrome.storage.local.set({ xhs_ball_pos: pos }); } catch (e) { /* 忽略 */ }
       }
