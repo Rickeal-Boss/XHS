@@ -74,10 +74,75 @@ function sanitizeSegment(seg) {
   return out;
 }
 
+/** 文件名主体至少保留的字符数（超出预算时也不会被压成空名） */
+var MIN_BASE = 12;
+
+/**
+ * 截断收尾：Windows 会静默剥离段尾的点与空格，
+ * 导致实际落盘的目录/文件名与预期不符。这里主动清掉。
+ * 注意只会缩短或等长（空串补 '_' 恰好 1 字符），
+ * 因此调用方的长度预算依然成立。
+ */
+function tidyTail(s) {
+  return s.replace(/[.\s]+$/, '') || '_';
+}
+
+/**
+ * 把目录段压到总长不超过 maxTotal。
+ *
+ * 采用「水位法」而不是按比例切：短段（如作者昵称）尽量完整保留，
+ * 只把过长的那几段削到统一上限，这样截断结果更符合直觉。
+ * 段数本身就超预算时，从尾部丢弃层级（保留更靠外的 baseDir）。
+ */
+function shrinkSegs(segs, maxTotal) {
+  while (segs.length > 1 && segs.length > maxTotal) segs = segs.slice(0, segs.length - 1);
+
+  var i, total = 0;
+  for (i = 0; i < segs.length; i++) total += segs[i].length;
+  if (total <= maxTotal) return segs;
+
+  // 二分求统一上限 cap：使 sum(min(len, cap)) 尽可能大且不超过 maxTotal
+  var lo = 1, hi = 0;
+  for (i = 0; i < segs.length; i++) if (segs[i].length > hi) hi = segs[i].length;
+  while (lo < hi) {
+    var mid = Math.ceil((lo + hi) / 2);
+    var sum = 0;
+    for (i = 0; i < segs.length; i++) sum += Math.min(segs[i].length, mid);
+    if (sum <= maxTotal) lo = mid; else hi = mid - 1;
+  }
+
+  var out = [];
+  var used = 0;
+  for (i = 0; i < segs.length; i++) {
+    var cut = Math.min(segs[i].length, lo);
+    out.push(segs[i].slice(0, cut));
+    used += cut;
+  }
+  // 二分给的是「不超过」的上限，可能仍有零头，按顺序补给尚未被截断的段
+  var spare = maxTotal - used;
+  for (i = 0; i < out.length && spare > 0; i++) {
+    var room = segs[i].length - out[i].length;
+    if (room > 0) {
+      var add = Math.min(spare, room);
+      out[i] = segs[i].slice(0, out[i].length + add);
+      spare -= add;
+    }
+  }
+  // 截断可能让段以点或空格结尾（Windows 会静默剥离，导致实际目录名与预期不符）
+  for (i = 0; i < out.length; i++) out[i] = tidyTail(out[i]);
+  return out;
+}
+
 /**
  * 组装安全的下载相对路径。
- * 注意：MAX_PATH 约束的是**全路径**，只截文件名是不够的，
- * 因此这里在拼好之后统一做长度兜底。
+ *
+ * MAX_PATH 约束的是**全路径**，而且不只是文件名会超：
+ * baseDir / 作者 / 标题 三级目录本身就可能吃掉全部预算。
+ * 早期实现只截文件名主体，当目录总长已经超过 MAX_PATH_LEN 时
+ * room 变负、被兜底成 8，整条路径依然严重超标
+ * （缺陷 D-04：实测 222 / 208 字符，远超 180 的预算）。
+ * 因此这里两级都要压，并保证不变式：
+ *   sum(目录段长) + 段数 + 文件名主体长 + 扩展名长 ≤ MAX_PATH_LEN
  */
 function buildPath(dir, name) {
   var segs = String(dir || '')
@@ -91,14 +156,32 @@ function buildPath(dir, name) {
   var base = dot > 0 ? fileName.slice(0, dot) : fileName;
   var ext = dot > 0 ? fileName.slice(dot) : '';
 
-  var full = segs.concat([base + ext]).join('/');
-  if (full.length > MAX_PATH_LEN) {
-    var room = MAX_PATH_LEN - (segs.join('/').length + segs.length) - ext.length;
-    if (room < 8) room = 8;
-    base = base.slice(0, room);
-    full = segs.concat([base + ext]).join('/');
+  // 段数本身 + 分隔符就可能撑爆预算 → 先从尾部丢弃多余层级
+  var maxSegs = MAX_PATH_LEN - MIN_BASE - 1 - ext.length;
+  if (maxSegs < 1) maxSegs = 1;
+  if (segs.length > maxSegs) segs = segs.slice(0, maxSegs);
+
+  // 预算 = 目录段总长 + 文件名主体长（分隔符与扩展名是固定开销）
+  var budget = MAX_PATH_LEN - segs.length - ext.length;
+
+  var i, segTotal = 0;
+  for (i = 0; i < segs.length; i++) segTotal += segs[i].length;
+
+  // 1) 目录过长 → 先压目录，给文件名主体留出至少 nameMin
+  var nameMin = Math.min(base.length, MIN_BASE);
+  if (segTotal + nameMin > budget) {
+    segs = shrinkSegs(segs, budget - nameMin);
+    segTotal = 0;
+    for (i = 0; i < segs.length; i++) segTotal += segs[i].length;
   }
-  return full;
+
+  // 2) 再用剩余预算压文件名主体
+  var room = budget - segTotal;
+  if (room < 1) room = 1;
+  if (base.length > room) base = base.slice(0, room);
+  base = tidyTail(base);
+
+  return segs.concat([base + ext]).join('/');
 }
 
 /* ========================= 已下载去重表 ========================= */

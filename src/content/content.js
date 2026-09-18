@@ -153,12 +153,38 @@
     });
   }
 
+  /**
+   * 不透明源判定。file:// 页面的 location.origin 是字符串 "file://"，
+   * 沙箱 iframe / data: 等则是 "null"。这两种情况下 origin 无法用于同源比对：
+   *   - 作为 postMessage 的 targetOrigin 非法（"null"）或永远匹配不上（"file://"）
+   *   - 同窗口消息的 ev.origin 统一是字符串 "null"，与 location.origin 永不相等
+   * 生产环境（https://www.xiaohongshu.com）不走这条分支，此处纯属健壮性兜底。
+   */
+  function originComparable() {
+    var o = location.origin;
+    return !!o && o !== 'null' && o !== 'file://';
+  }
+
+  /** postMessage 的 targetOrigin：可比对时精确限定（比 '*' 安全），否则退回 '*'。 */
+  function targetOrigin() {
+    return originComparable() ? location.origin : '*';
+  }
+
+  /**
+   * 入站消息同源校验。
+   * 注意：这**不是**安全边界——同窗口的页面脚本可以伪造 ev.origin 之外的一切，
+   * 真正防线是 acceptNote() 里的 sanitizeNote() 白名单。这里只做粗筛。
+   */
+  function originOk(ev) {
+    return !originComparable() || ev.origin === location.origin;
+  }
+
   function applyHookSetting() {
     window.postMessage({
       __channel: CHANNEL,
       type: 'SET_HOOK',
       payload: { enabled: settings.hookEnabled !== false }
-    }, '*');
+    }, targetOrigin());
   }
 
   /* ========================= 笔记状态 ========================= */
@@ -287,7 +313,7 @@
 
   window.addEventListener('message', function (ev) {
     if (ev.source !== window) return;
-    if (ev.origin !== location.origin) return;
+    if (!originOk(ev)) return;
     var d = ev.data;
     if (!d || d.__channel !== CHANNEL) return;
 
@@ -334,7 +360,7 @@
   });
 
   function requestRescan() {
-    window.postMessage({ __channel: CHANNEL, type: 'REQUEST_RESCAN' }, location.origin);
+    window.postMessage({ __channel: CHANNEL, type: 'REQUEST_RESCAN' }, targetOrigin());
   }
 
   /* ========================= 下载 ========================= */

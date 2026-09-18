@@ -172,7 +172,10 @@
     ├── make_icons.py          图标生成脚本（零依赖）
     ├── make_preview.py        生成自包含的 UI 预览页
     ├── diag_panel.py          面板显隐诊断（无头 Edge）
-    └── shot_options.py        设置页渲染截图（无头 Edge）
+    ├── shot_options.py        设置页渲染截图（无头 Edge）
+    ├── test_bridge.py         消息桥与提取引擎的真实浏览器验证（无头 Edge）
+    ├── check_path_budget.js   buildPath 长度预算的属性测试
+    └── check_base_spread.js   pickBase 的 CDN 域名分布检查
 ```
 
 ### 运行测试
@@ -181,9 +184,32 @@
 node tests/test-downloader.js
 node tests/test-background.js
 node tests/test-extractor.js
+
+# 不变式 / 属性测试
+node tools/check_path_budget.js    # 3304 项断言：路径长度上限、扩展名保留、无空段、段尾无点空格
+node tools/check_base_spread.js    # 确定性 + 分散性：同一 key 稳定、不同 key 分散到多个 CDN
 ```
 
-全部为纯 Node 脚本，不需要安装任何依赖。
+全部为纯 Node 脚本，不需要安装任何依赖。`tools/test_bridge.py` 需要本机 Edge，在真实浏览器里验证 MAIN world ↔ 隔离世界的消息桥与三条提取路径（原图重拼 / 原视频 / 实况视频）：
+
+```bash
+python tools/test_bridge.py
+```
+
+### 两个关键不变式
+
+**下载路径长度**。Windows 的 `MAX_PATH` 约束的是**全路径**，而 `baseDir / 作者 / 标题` 三级目录本身就可能吃掉全部预算。`buildPath` 保证：
+
+```
+sum(目录段长) + 段数 + 文件名主体长 + 扩展名长 ≤ 180
+```
+
+压缩采用**水位法**（二分统一上限）而非按比例切，因此短段（作者昵称）尽量完整保留，只削过长的那几段；截断后统一清理段尾的点与空格（Windows 会静默剥离，导致实际落盘名与预期不符）。
+
+**CDN 域名选择**。`pickBase` 对 `fileKey` 做 djb2 哈希取模，语义是「**按 key 稳定、跨 key 分散**」：
+
+- *稳定* —— 同一张图在任何时刻、任何次扫描都得到同一个 URL。这不只是可复现性问题：`background.js` 的会话级去重表是按 URL 建的，早期用 `Math.random()` 时同一张图每次 URL 都不同，去重永远命中不了，重复下载会产出 `标题 (1).jpg` 这类冗余文件。
+- *分散* —— 大量不同 `fileKey` 仍均匀落在各 CDN 域名上（实测最多/最少 ≤ 1.05），保留负载分散的好处。
 
 ### 生成 UI 预览
 

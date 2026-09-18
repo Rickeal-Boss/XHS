@@ -63,6 +63,13 @@
   var MAX_DEPTH = 12;
   var MAX_NODES = 20000;
 
+  /**
+   * 已知的非笔记对象类型。
+   * 小红书的评论对象同样带 note_id（指向所属笔记），因此「有 note_id」不足以
+   * 判定为笔记。仅用于形态三的自判，note_card / note_detail_map 是结构性位置，不受影响。
+   */
+  var NON_NOTE_TYPES = { comment: 1, sub_comment: 1, user: 1, reply: 1 };
+
   /* ========================= 基础工具函数 ========================= */
 
   function isObj(v) {
@@ -96,8 +103,24 @@
     return 0;
   }
 
-  function pickBase(bases) {
-    return bases[Math.floor(Math.random() * bases.length)];
+  /**
+   * 按 key 确定性地挑一个 CDN 域名。
+   *
+   * 早期实现是 Math.random()，看似能分散负载，实则引入两个真实缺陷：
+   *   1. background.js 的「会话内已下载去重表」是按 URL 建的（DONE_KEY），
+   *      同一张图每次扫描得到不同 URL → 去重永远命中不了 → 重复下载会
+   *      产出 "标题 (1).jpg" 这类冗余文件，去重功能形同虚设。
+   *   2. 导出 JSON / 测试断言无法复现（同一笔记两次扫描结果不同）。
+   * 改成对 key 做 djb2 哈希取模后：不同图片仍会分散到不同 CDN 域名，
+   * 但同一张图在任何时刻、任何次扫描都得到同一个 URL。
+   */
+  function pickBase(bases, key) {
+    if (!key) return bases[0];
+    var h = 5381;
+    for (var i = 0; i < key.length; i++) {
+      h = ((h << 5) + h + key.charCodeAt(i)) | 0;
+    }
+    return bases[Math.abs(h) % bases.length];
   }
 
   /** 当前笔记 id（从 URL 推断） */
@@ -163,13 +186,13 @@
     var clean = urlDefault.split('?')[0];
     var m = clean.match(FILE_KEY_RE);
     if (!m || !m[0]) return '';
-    return pickBase(IMG_BASES) + m[0];
+    return pickBase(IMG_BASES, m[0]) + m[0];
   }
 
   /** 原视频直链：origin_video_key 是小红书自己提供的「原画质」入口 */
   function buildOriginVideo(key) {
     if (!key) return '';
-    return pickBase(VIDEO_BASES) + key;
+    return pickBase(VIDEO_BASES, key) + key;
   }
 
   /**
@@ -279,8 +302,19 @@
         }
       }
 
-      // 形态三：自身就是一条笔记
-      if (get(node, 'note_id') && (get(node, 'image_list') || get(node, 'video') || get(node, 'desc'))) {
+      // 形态三：自身就是一条笔记。
+      // 判定不能只看 image_list / video / desc —— 小红书确实存在
+      // image_list 为 null、且没有正文的笔记（例如纯标题卡片），
+      // 这类笔记漏判会让用户看到「未识别到笔记」。
+      // 只要带 note_id，再命中任意一个笔记特征字段即视为笔记。
+      var nodeType = str(get(node, 'type')).toLowerCase();
+      if (!NON_NOTE_TYPES[nodeType] && get(node, 'note_id') && (
+        get(node, 'image_list') ||
+        get(node, 'video') ||
+        get(node, 'desc') ||
+        get(node, 'title') ||
+        get(node, 'type')
+      )) {
         pushNote(node, bag);
       }
 
@@ -300,10 +334,23 @@
       bag[data.noteId] = data;
       return;
     }
-    // 同一条笔记出现多次时，保留信息更完整的那一份
+    // 同一条笔记出现多次时，保留信息更完整的那一份。
+    //
+    // 评分必须把标题/正文/作者等元信息计入，不能只数图片和视频：
+    // collectNotes 是 LIFO 遍历（stack.pop），同一 note_id 的多份数据
+    // 谁先入袋取决于数组顺序。若两份数据都是「零图片零视频」，纯媒体计分
+    // 会打出 0:0 平手，而下面的比较是严格 >，先入袋者胜出 ——
+    // 真实笔记的标题就会被后出现的空壳对象吞掉（缺陷 D-07）。
     var score = function (d) {
-      return d.images.length * 10 + (d.video ? 100 : 0) +
+      var s = d.images.length * 10 +
+        (d.video ? 100 : 0) +
         d.images.filter(function (i) { return i.liveVideoUrl; }).length * 50;
+      if (d.title) s += 30;
+      if (d.desc) s += 20;
+      if (d.author && (d.author.nickname || d.author.userId)) s += 15;
+      if (d.publishTime) s += 5;
+      if (d.cover) s += 5;
+      return s;
     };
     if (score(data) > score(prev)) {
       data.source = prev.source === 'initial-state' ? prev.source : data.source;
@@ -313,10 +360,30 @@
 
   /* ========================= 对外投递 ========================= */
 
+  /**
+   * 是否为「可比较的来源」。
+   * 不透明源下 location.origin 与 ev.origin 的序列化不一致：
+   *   file:// 页面  location.origin === "file://"，而 ev.origin === "null"
+   * 两者永不相等，若强行校验会把所有消息丢掉（消息桥静默失效）。
+   * 注意：同窗口消息本就伪造不出跨源来源，该校验防不住页面自身脚本，
+   * 真正的防线是隔离世界的 sanitizeNote() 白名单。
+   */
+  function originComparable() {
+    var o = location.origin;
+    return !!o && o !== 'null' && o !== 'file://';
+  }
+
+  function targetOrigin() {
+    return originComparable() ? location.origin : '*';
+  }
+
+  function originOk(ev) {
+    return !originComparable() || ev.origin === location.origin;
+  }
+
   function post(type, payload) {
     try {
-      // 用 location.origin 而非 '*'，避免消息被转发到其他源
-      window.postMessage({ __channel: CHANNEL, type: type, payload: payload }, location.origin);
+      window.postMessage({ __channel: CHANNEL, type: type, payload: payload }, targetOrigin());
     } catch (e) { /* 忽略：不影响宿主页面 */ }
   }
 
@@ -563,7 +630,7 @@
 
   window.addEventListener('message', function (ev) {
     if (ev.source !== window) return;
-    if (ev.origin !== location.origin) return;
+    if (!originOk(ev)) return;
     var d = ev.data;
     if (!d || d.__channel !== CHANNEL) return;
     if (d.type === 'REQUEST_RESCAN') {

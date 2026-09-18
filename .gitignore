@@ -22,3 +22,7 @@ desktop.ini
 # 测试临时输出
 tests/output/
 *.log
+
+# 版本冻结校验 / 测试输出快照（由校验流程生成，不入库）
+tests/_hash_*.txt
+tests/_out-*.txt

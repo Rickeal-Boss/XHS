@@ -211,6 +211,9 @@ var XHS_DL_CSS = `
   flex: 0 0 auto;
 }
 .xhs-dl-meta-name { font-weight: 500; color: var(--xhs-text); }
+/* 元信息之间的分隔点：颜色比正文淡一档，且不参与 flex 压缩
+   （否则空间紧张时「·」会被挤没，两个字段看起来像连在一起） */
+.xhs-dl-meta-dot { flex: 0 0 auto; color: var(--xhs-text-mute); }
 .xhs-dl-meta-title {
   overflow: hidden;
   text-overflow: ellipsis;
