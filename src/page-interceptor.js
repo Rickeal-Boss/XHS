@@ -123,20 +123,43 @@
     return bases[Math.abs(h) % bases.length];
   }
 
-  /** 当前笔记 id（从 URL 推断） */
+  /**
+   * 当前笔记 id（从 URL 推断）。
+   * 覆盖三种真实路径：/explore/<id>、/discovery/item/<id>（分享链接）、
+   * 以及带查询串的短链落地页 /discovery/item/<id>?xsec_token=...
+   */
   function currentNoteId() {
     try {
       var m = location.pathname.match(/\/(?:explore|discovery\/item)\/([0-9a-zA-Z]+)/);
-      return m ? m[1] : '';
+      if (m) return m[1];
+      // 个别落地页把 id 放在查询串里
+      var q = location.search.match(/[?&](?:note_?id|id)=([0-9a-zA-Z]+)/);
+      return q ? q[1] : '';
     } catch (e) {
       return '';
     }
   }
 
+  /**
+   * 拼笔记链接。国际站（rednote.com）上的笔记应回链到本站域名，
+   * 早期写死 xiaohongshu.com 会让国际站用户复制到的链接跳转一次。
+   */
+  function noteUrl(noteId) {
+    try {
+      if (/(^|\.)(xiaohongshu\.com|rednote\.com)$/i.test(location.hostname)) {
+        return location.protocol + '//' + location.hostname + '/explore/' + noteId;
+      }
+    } catch (e) { /* 忽略：取不到 location 时用默认值 */ }
+    return 'https://www.xiaohongshu.com/explore/' + noteId;
+  }
+
   function isApiUrl(url) {
     if (!url || typeof url !== 'string') return false;
     var lower = url.toLowerCase();
-    if (lower.indexOf('xiaohongshu.com') === -1) return false;
+    // 国际站同样走 /api/sns/... 接口，只认 xiaohongshu.com 会漏掉 rednote.com
+    if (lower.indexOf('xiaohongshu.com') === -1 && lower.indexOf('rednote.com') === -1) {
+      return false;
+    }
     for (var i = 0; i < BINARY_HINTS.length; i++) {
       if (lower.indexOf(BINARY_HINTS[i]) !== -1) return false;
     }
@@ -148,29 +171,106 @@
 
   /* ========================== 数据提取 ========================== */
 
+  /** 编解码器兼容性顺序（仅在画质字段全平时用于兜底排序） */
+  var CODEC_ORDER = ['h264', 'h265', 'h266', 'av1'];
+
   /**
-   * 从 stream 对象中按编解码器优先级取一个可播放地址。
-   * 默认优先 h264：兼容性最好，本地播放器/剪辑软件都能直接打开。
+   * 画质降序比较：height → videoBitrate → size，全平时按编解码器兼容性。
+   *
+   * 参考实现（XHS-Downloader 12.7k★）的做法是跨编解码器按 height 全局降序取
+   * 最优；其配套油猴脚本同样是 sortArray(allStreams, "height") 后取 [0]。
+   * 早期我们只取「命中的第一个编解码器的第一条」，既不看分辨率也不留备用 ——
+   * 同一编解码器下有多档分辨率时会取到数组里第一条（可能是最低档）。
    */
-  function streamUrl(stream, order) {
-    if (!isObj(stream)) return '';
-    order = order || ['h264', 'h265', 'h266', 'av1'];
-    for (var i = 0; i < order.length; i++) {
-      var arr = stream[order[i]];
-      if (Array.isArray(arr) && arr.length) {
-        for (var k = 0; k < arr.length; k++) {
-          var item = arr[k];
-          if (!isObj(item)) continue;
-          var u = str(get(item, 'master_url'));
-          if (!u) {
-            var backups = get(item, 'backup_urls');
-            if (Array.isArray(backups) && backups.length) u = str(backups[0]);
-          }
-          if (u) return u;
-        }
+  function codecRank(c) {
+    var i = CODEC_ORDER.indexOf(c);
+    return i < 0 ? 99 : i;              // 未知编解码器排最后
+  }
+
+  function byQualityDesc(a, b) {
+    var d = num(get(b, 'height')) - num(get(a, 'height'));
+    if (d) return d;
+    d = num(get(b, 'video_bitrate')) - num(get(a, 'video_bitrate'));
+    if (d) return d;
+    d = num(get(b, 'size')) - num(get(a, 'size'));
+    if (d) return d;
+    return codecRank(a.__codec) - codecRank(b.__codec);
+  }
+
+  /**
+   * 从 stream 中取出全部候选直链，去重后按指定策略排序返回。
+   * 调用方可取 [0] 作主直链、其余作备用直链。
+   *
+   * @param {'compat'|'quality'} mode
+   *   compat  —— 编解码器兼容性优先（h264 最稳），同编解码器内按画质降序。默认值。
+   *   quality —— 画质优先（height → bitrate → size 降序），编解码器仅作平手兜底。
+   *              参考实现 XHS-Downloader 采用此策略；但可能选中 h265/av1，
+   *              部分老旧播放器打不开，因此不设为默认。
+   */
+  function streamCandidates(stream, mode) {
+    if (!isObj(stream)) return [];
+    var name = {};                       // 编解码器名 → 索引，用于排序兜底
+    Object.keys(stream).forEach(function (k, i) { name[k] = i; });
+
+    var items = [];
+    Object.keys(stream).forEach(function (codec) {
+      var arr = stream[codec];
+      if (!Array.isArray(arr)) return;
+      for (var k = 0; k < arr.length; k++) {
+        var it = arr[k];
+        if (!isObj(it)) continue;
+        items.push({
+          __raw: it,
+          __codec: codec,
+          __seq: k,
+          height: num(get(it, 'height')),
+          video_bitrate: num(get(it, 'video_bitrate')),
+          size: num(get(it, 'size'))
+        });
+      }
+    });
+
+    var compat = mode !== 'quality';
+    items.sort(function (a, b) {
+      if (compat) {
+        // 编解码器优先，同编解码器内按画质降序
+        var r = codecRank(a.__codec) - codecRank(b.__codec);
+        if (r) return r;
+      }
+      // byQualityDesc 内部已含编解码器兜底，缺画质字段的条目各项为 0，
+      // 会自然排在有画质字段的条目之后，不会「无信息条目反压高画质条目」
+      var d = byQualityDesc(a, b);
+      if (d) return d;
+      if (!compat) {
+        var r2 = codecRank(a.__codec) - codecRank(b.__codec);
+        if (r2) return r2;
+      }
+      return a.__seq - b.__seq;
+    });
+
+    var out = [];
+    var seen = {};
+    function add(u) {
+      u = str(u);
+      if (!u || seen[u]) return;
+      seen[u] = 1;
+      out.push(u);
+    }
+    for (var i = 0; i < items.length; i++) {
+      var raw = items[i].__raw;
+      add(get(raw, 'master_url'));
+      var backups = get(raw, 'backup_urls');
+      if (Array.isArray(backups)) {
+        for (var b = 0; b < backups.length; b++) add(backups[b]);
       }
     }
-    return '';
+    return out;
+  }
+
+  /** 主直链（画质最优的一条）。保留旧签名为兼容。 */
+  function streamUrl(stream, order) {
+    var list = streamCandidates(stream, order);
+    return list.length ? list[0] : '';
   }
 
   function coverUrl(cover) {
@@ -211,7 +311,7 @@
     var data = {
       noteId: noteId,
       source: source || 'unknown',
-      url: 'https://www.xiaohongshu.com/explore/' + noteId,
+      url: noteUrl(noteId),
       title: str(get(raw, 'title')) || str(get(raw, 'display_title')),
       desc: str(get(raw, 'desc')) || str(get(raw, 'description')),
       type: str(get(raw, 'type')) || (videoRaw ? 'video' : 'normal'),
@@ -237,13 +337,21 @@
       var img = imageList[i];
       if (!isObj(img)) continue;
       var urlDefault = str(get(img, 'url_default')) || str(get(img, 'url')) || str(get(img, 'url_pre'));
-      var liveVideo = streamUrl(get(img, 'stream'), ['h264', 'h265', 'av1']);
+      var originImage = buildOriginImage(urlDefault);
+      // 实况视频的备用直链：早期实况任务 fallbacks 是空数组，
+      // 主直链一失败就直接判死，而参考实现明确把 backupUrls 也纳入候选。
+      var liveStream = get(img, 'stream');
+      var liveList = streamCandidates(liveStream, 'compat').slice(0, 6);
+      var liveBest = streamCandidates(liveStream, 'quality').slice(0, 6);
+      var liveVideo = liveList.length ? liveList[0] : '';
       data.images.push({
         index: i,
         urlDefault: urlDefault,
-        urlOrigin: buildOriginImage(urlDefault),
-        urlJpg: buildOriginImage(urlDefault) ? buildOriginImage(urlDefault) + JPG_PARAMS : '',
+        urlOrigin: originImage,
+        urlJpg: originImage ? originImage + JPG_PARAMS : '',
         liveVideoUrl: liveVideo,
+        liveVideoUrls: liveList,
+        liveVideoUrlsBest: liveBest,
         isLive: !!liveVideo || !!get(img, 'live_photo'),
         width: num(get(img, 'width')),
         height: num(get(img, 'height'))
@@ -255,11 +363,15 @@
       var consumer = get(videoRaw, 'consumer') || {};
       var media = get(videoRaw, 'media') || {};
       var originKey = str(get(consumer, 'origin_video_key'));
-      var vStream = streamUrl(get(media, 'stream'), ['h264', 'h265', 'av1']);
+      var vStreamRaw = get(media, 'stream');
+      var vList = streamCandidates(vStreamRaw, 'compat').slice(0, 6);
+      var vBest = streamCandidates(vStreamRaw, 'quality').slice(0, 6);
       data.video = {
         urlOrigin: buildOriginVideo(originKey),
         originKey: originKey,
-        urlStream: vStream,
+        urlStream: vList.length ? vList[0] : '',
+        urlStreams: vList,
+        urlStreamsBest: vBest,
         cover: coverUrl(get(videoRaw, 'cover')) || coverUrl(get(media, 'video_cover')) || data.cover,
         duration: num(get(videoRaw, 'capa') ? get(get(videoRaw, 'capa'), 'duration') : 0) ||
           num(get(media, 'video_duration')) || num(get(videoRaw, 'duration'))

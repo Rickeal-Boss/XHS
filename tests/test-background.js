@@ -21,24 +21,33 @@ var src = fs.readFileSync(SRC, 'utf8');
 /* ================================================================== */
 
 H.suite('前置条件 — 函数抽取');
-var mRe = src.match(/var RESERVED_RE = .*?;/);
-var mMax = src.match(/var MAX_PATH_LEN = \d+;/);
-var mSeg = src.match(/function sanitizeSegment\s*\([\s\S]*?\n\}/);
-var mPath = src.match(/function buildPath\s*\([\s\S]*?\n\}/);
-ok('PRE-1', '成功抽取 RESERVED_RE', !!mRe);
-ok('PRE-2', '成功抽取 MAX_PATH_LEN', !!mMax);
-ok('PRE-3', '成功抽取 sanitizeSegment', !!mSeg);
-ok('PRE-4', '成功抽取 buildPath', !!mPath);
+/* background.js 未导出 sanitizeSegment / buildPath，这里整段抽取
+   「RESERVED_RE 声明 → buildPath 函数结束」的源码区域后求值。
+   抽取失败会显式报错，不会静默跳过。 */
+var startIdx = src.indexOf('var RESERVED_RE');
+if (startIdx === -1) startIdx = src.indexOf('/** Windows 保留设备名');
+var bpIdx = src.indexOf('function buildPath');
+var endIdx = bpIdx === -1 ? -1 : src.indexOf('\n}', bpIdx);
+var region = (startIdx !== -1 && endIdx !== -1) ? src.slice(startIdx, endIdx + 2) : '';
 
-var ctx = vm.createContext({ console: console });
+ok('PRE-1', '成功定位 RESERVED_RE 声明', startIdx !== -1);
+ok('PRE-2', '成功定位 buildPath 结束位置', endIdx !== -1);
+ok('PRE-3', '抽取区域包含 sanitizeSegment', region.indexOf('function sanitizeSegment') !== -1);
+ok('PRE-4', '抽取区域包含 buildPath', region.indexOf('function buildPath') !== -1);
+ok('PRE-5', '抽取区域包含 MAX_PATH_LEN 与 RESERVED_RE',
+  region.indexOf('MAX_PATH_LEN') !== -1 && region.indexOf('RESERVED_RE') !== -1);
+
+var ctx = vm.createContext({ console: console, URL: URL });
 vm.runInContext([
-  mRe[0], mMax[0], mSeg[0], mPath[0],
+  region,
   'this.__sanitizeSegment = sanitizeSegment; this.__buildPath = buildPath; this.__MAX = MAX_PATH_LEN;'
 ].join('\n'), ctx);
 var sanitizeSegment = ctx.__sanitizeSegment;
 var buildPath = ctx.__buildPath;
 var MAX_PATH_LEN = ctx.__MAX;
-eq('PRE-5', 'MAX_PATH_LEN = 180', MAX_PATH_LEN, 180);
+eq('PRE-6', 'MAX_PATH_LEN = 180', MAX_PATH_LEN, 180);
+ok('PRE-7', 'sanitizeSegment / buildPath 抽取成功',
+  typeof sanitizeSegment === 'function' && typeof buildPath === 'function');
 
 /* ---------------- sanitizeSegment ---------------- */
 H.suite('sanitizeSegment — 路径段清洗');
@@ -84,6 +93,18 @@ eq('SS-27', 'title... → title', sanitizeSegment('title...'), 'title');
 eq('SS-28', 'title   → title', sanitizeSegment('title   '), 'title');
 eq('SS-29', 'title. . → title', sanitizeSegment('title. .'), 'title');
 
+/* Unicode 形似分隔符 */
+eq('SS-30', '全角斜杠 ／ (U+FF0F) → _', sanitizeSegment('a\uFF0Fb'), 'a_b');
+eq('SS-31', '全角反斜杠 ＼ (U+FF3C) → _', sanitizeSegment('a\uFF3Cb'), 'a_b');
+eq('SS-32', '全角句点 ． (U+FF0E) → _', sanitizeSegment('a\uFF0Eb'), 'a_b');
+eq('SS-33', 'one dot leader ․ (U+2024) → _', sanitizeSegment('a\u2024b'), 'a_b');
+eq('SS-34', 'division slash ∕ (U+2215) → _', sanitizeSegment('a\u2215b'), 'a_b');
+eq('SS-35', 'fraction slash ⁄ (U+2044) → _', sanitizeSegment('a\u2044b'), 'a_b');
+eq('SS-36', 'big solidus ⧸ (U+29F8) → _', sanitizeSegment('a\u29F8b'), 'a_b');
+eq('SS-37', '中文全角冒号「：」不在拦截集内，保持原样', sanitizeSegment('标题：测试'), '标题：测试');
+eq('SS-38', '全角斜杠构造的穿越无法逃逸',
+  /[\/\\]/.test(sanitizeSegment('..\uFF0F..\uFF0Fetc')), false);
+
 /* ---------------- buildPath ---------------- */
 H.suite('buildPath — 完整路径组装');
 
@@ -94,8 +115,9 @@ eq('BP-4', '空目录段被丢弃', buildPath('a//b/', 'f.jpg'), 'a/b/f.jpg');
 eq('BP-5', '全部为空的目录', buildPath('///', 'f.jpg'), 'f.jpg');
 eq('BP-6', '目录段清洗为 _ 后被丢弃', buildPath('a/../b', 'f.jpg'), 'a/b/f.jpg');
 eq('BP-7', '目录穿越无法逃逸', buildPath('../../etc', 'passwd'), 'etc/passwd');
-eq('BP-8', '反斜杠目录穿越无法逃逸',
-  /\.\./.test(buildPath('..\\..\\windows', 'x.txt')), false);
+ok('BP-8', '反斜杠目录穿越无法逃逸（反斜杠被替换为 _，无分隔符残留）',
+  buildPath('..\\..\\windows', 'x.txt') === '_.._windows/x.txt',
+  'actual=' + buildPath('..\\..\\windows', 'x.txt'));
 eq('BP-9', '绝对目录被去根', buildPath('/etc', 'x'), 'etc/x');
 eq('BP-10', '盘符目录被清洗', buildPath('C:\\Windows', 'x'), 'C__Windows/x');
 eq('BP-11', '空文件名 → _', buildPath('', ''), '_');
@@ -178,6 +200,7 @@ function makeChromeStub(opts) {
       search: function (q, cb) { cb([{ id: q.id, bytesReceived: 512, totalBytes: 1024 }]); }
     },
     runtime: {
+      id: 'test-ext-id',
       onMessage: { addListener: function (fn) { st.listeners.message = fn; } },
       onInstalled: { addListener: function (fn) { st.listeners.installed = fn; } },
       getManifest: function () { return { version: '1.0.0' }; },
@@ -210,6 +233,7 @@ function loadBackground(st) {
     chrome: st.chrome,
     console: console,
     Promise: Promise,
+    URL: URL,               // vm 上下文默认不含 WHATWG URL，必须显式注入
     setTimeout: function (fn, ms) {
       // 20 分钟兜底超时 / 800ms 轮询：用小预算模拟，避免测试挂死
       if (ms >= 20 * 60 * 1000) return 0;
@@ -234,12 +258,12 @@ function tick(n) {
 }
 
 /** 以指定 tabId 发起一批下载，等待 DL_ALL_DONE */
-async function dispatchBatch(st, tabId, tasks, noteId) {
+async function dispatchBatch(st, tabId, tasks, noteId, senderId) {
   var before = st.sent.length;
   var resp = null;
   st.listeners.message(
     { type: 'DOWNLOAD_BATCH', payload: { tasks: tasks, noteId: noteId } },
-    { tab: { id: tabId } },
+    { id: senderId === undefined ? 'test-ext-id' : senderId, tab: { id: tabId } },
     function (r) { resp = r; }
   );
   for (var i = 0; i < 60; i++) {
@@ -256,6 +280,9 @@ function task(name, url, fallbacks, dir) {
   return { kind: 'image', name: name, url: url, dir: dir || 'dir', fallbacks: fallbacks || [] };
 }
 
+var HOST = 'https://sns-img-qc.xhscdn.com/';
+var VHOST = 'https://sns-video-hw.xhscdn.com/';
+
 async function main() {
   H.suite('background — 消息入口与参数校验');
 
@@ -263,16 +290,16 @@ async function main() {
   var st0 = makeChromeStub();
   loadBackground(st0);
   var r0 = null;
-  st0.listeners.message({ type: 'PING' }, { tab: { id: 1 } }, function (r) { r0 = r; });
+  st0.listeners.message({ type: 'PING' }, { id: 'test-ext-id', tab: { id: 1 } }, function (r) { r0 = r; });
   eq('BG-1', 'PING 返回版本号', r0 && r0.version, '1.0.0');
 
   /* ---- 空任务 ---- */
   var r1 = null;
-  st0.listeners.message({ type: 'DOWNLOAD_BATCH', payload: { tasks: [] } }, { tab: { id: 1 } }, function (r) { r1 = r; });
+  st0.listeners.message({ type: 'DOWNLOAD_BATCH', payload: { tasks: [] } }, { id: 'test-ext-id', tab: { id: 1 } }, function (r) { r1 = r; });
   eq('BG-2', '空任务 → error=empty', r1 && r1.error, 'empty');
 
   /* ---- 无 type 的消息 ---- */
-  var ret = st0.listeners.message({}, { tab: { id: 1 } }, function () {});
+  var ret = st0.listeners.message({}, { id: 'test-ext-id', tab: { id: 1 } }, function () {});
   eq('BG-3', '无 type 消息返回 false 且不应答', ret, false);
 
   /* ---- 正常批次 ---- */
@@ -318,7 +345,7 @@ async function main() {
   // 立刻再发一批（模拟用户切标签页后另一页触发）
   await tick(1);
   st2.listeners.message({ type: 'DOWNLOAD_BATCH', payload: { tasks: [task('b.jpg', 'https://sns-img-qc.xhscdn.com/b')] } },
-    { tab: { id: 2002 } }, function (r) { busyResp = r; });
+    { id: 'test-ext-id', tab: { id: 2002 } }, function (r) { busyResp = r; });
   eq('BG-19', '批次进行中时新批次被拒（busy）', busyResp && busyResp.error, 'busy');
   var res2 = await p;
   ok('BG-20', '并发被拒后原批次仍只向 1001 回传',
@@ -330,12 +357,12 @@ async function main() {
   H.suite('background — URL 去重（storage.session）');
   var st3 = makeChromeStub();
   loadBackground(st3);
-  var res3a = await dispatchBatch(st3, 5, [task('1.jpg', 'https://x/a'), task('2.jpg', 'https://x/b')], 'n');
+  var res3a = await dispatchBatch(st3, 5, [task('1.jpg', HOST + 'a'), task('2.jpg', HOST + 'b')], 'n');
   eq('BG-22', '首批下载 2 个', st3.downloads.length, 2);
   ok('BG-23', '去重表写入 session', Array.isArray(st3.session.xhs_dl_done_urls) && st3.session.xhs_dl_done_urls.length === 2,
     'done=' + JSON.stringify(st3.session.xhs_dl_done_urls));
 
-  var res3b = await dispatchBatch(st3, 5, [task('1.jpg', 'https://x/a'), task('2.jpg', 'https://x/b'), task('3.jpg', 'https://x/c')], 'n');
+  var res3b = await dispatchBatch(st3, 5, [task('1.jpg', HOST + 'a'), task('2.jpg', HOST + 'b'), task('3.jpg', HOST + 'c')], 'n');
   eq('BG-24', '第二批仅下载未去重的 1 个', st3.downloads.length, 3);
   var skipped = res3b.messages.filter(function (m) { return m.msg.type === 'DL_SKIPPED'; });
   ok('BG-25', '发出 DL_SKIPPED 提示', skipped.length === 1, 'count=' + (skipped[0] && skipped[0].msg.payload.count));
@@ -350,7 +377,7 @@ async function main() {
   var st4 = makeChromeStub({ throwOn: ['BAD'] });
   loadBackground(st4);
   var res4 = await dispatchBatch(st4, 9, [
-    task('1.jpg', 'https://BAD/x', ['https://sns-img-qc.xhscdn.com/ok1'])
+    task('1.jpg', HOST + 'BAD/x', [HOST + 'ok1'])
   ], 'n');
   eq('BG-30', '首个直链抛错后尝试备用直链', st4.downloads.length, 2);
   eq('BG-31', '备用直链成功完成', res4.messages.filter(function (m) { return m.msg.type === 'DL_ALL_DONE'; })[0].msg.payload.ok, 1);
@@ -375,12 +402,12 @@ async function main() {
   var st6 = makeChromeStub();
   loadBackground(st6);
   var pc = dispatchBatch(st6, 3, [
-    task('1.jpg', 'https://x/1'), task('2.jpg', 'https://x/2'),
-    task('3.jpg', 'https://x/3'), task('4.jpg', 'https://x/4')
+    task('1.jpg', HOST + '1'), task('2.jpg', HOST + '2'),
+    task('3.jpg', HOST + '3'), task('4.jpg', HOST + '4')
   ], 'n');
   await tick(1);
   var cancelResp = null;
-  st6.listeners.message({ type: 'CANCEL_BATCH' }, { tab: { id: 3 } }, function (r) { cancelResp = r; });
+  st6.listeners.message({ type: 'CANCEL_BATCH' }, { id: 'test-ext-id', tab: { id: 3 } }, function (r) { cancelResp = r; });
   eq('BG-37', 'CANCEL_BATCH 应答 ok', cancelResp && cancelResp.ok, true);
   var res6 = await pc;
   ok('BG-38', '取消后下载数 < 4（批次被中断）', st6.downloads.length < 4,
@@ -400,6 +427,86 @@ async function main() {
   var st7 = makeChromeStub();
   loadBackground(st7);
   ok('BG-41', 'onInstalled 监听已注册', typeof st7.listeners.installed === 'function');
+
+  /* ---- 下载 URL 白名单（纵深防御） ---- */
+  H.suite('background — 下载 URL 白名单');
+  var st8 = makeChromeStub();
+  loadBackground(st8);
+  var res8 = await dispatchBatch(st8, 11, [
+    task('file.jpg', 'file:///etc/passwd'),
+    task('js.jpg', 'javascript:alert(1)'),
+    task('data.jpg', 'data:text/html;base64,PHNjcmlwdD4='),
+    task('evil.jpg', 'https://evil.example.com/a.jpg'),
+    task('ok.jpg', HOST + 'a')
+  ], 'n');
+  var d8 = res8.messages.filter(function (m) { return m.msg.type === 'DL_ALL_DONE'; })[0];
+  eq('BG-45', '仅放行白名单域名的 http(s) URL', st8.downloads.length, 1);
+  eq('BG-46', 'file:// 被拒', st8.downloads[0].url, HOST + 'a');
+  eq('BG-47', '失败项包含 4 个非法 URL', d8.msg.payload.failed.length, 4);
+  ok('BG-48', 'failed 列表含 file.jpg', d8.msg.payload.failed.indexOf('file.jpg') !== -1,
+    'failed=' + JSON.stringify(d8.msg.payload.failed));
+  eq('BG-49', 'lastError = url-rejected', d8.msg.payload.lastError, 'url-rejected');
+  eq('BG-50', 'ok 计数为 1', d8.msg.payload.ok, 1);
+
+  var st9 = makeChromeStub();
+  loadBackground(st9);
+  var res9 = await dispatchBatch(st9, 12, [
+    task('x.jpg', 'https://www.xiaohongshu.com/a.jpg'),
+    task('y.jpg', 'https://sns-img-hw.xhscdn.net/b'),
+    task('z.jpg', 'https://ci.xiaohongshu.com/c'),
+    task('w.jpg', 'https://xhscdn.com/d'),
+    task('v.jpg', 'https://notxhscdn.com/e')
+  ], 'n');
+  eq('BG-51', 'xiaohongshu.com / xhscdn.net / xhscdn.com / ci.xiaohongshu.com 均放行，仿冒域名被拒',
+    st9.downloads.length, 4);
+  ok('BG-52', '仿冒域名 notxhscdn.com 未通过',
+    st9.downloads.every(function (d) { return d.url.indexOf('notxhscdn') === -1; }));
+
+  /* ---- 批次规模上限 ---- */
+  H.suite('background — 批次规模上限');
+  var st10 = makeChromeStub();
+  loadBackground(st10);
+  var big = [];
+  for (var bi = 0; bi < 301; bi++) big.push(task('f' + bi + '.jpg', HOST + 'f' + bi));
+  var bigResp = null;
+  st10.listeners.message({ type: 'DOWNLOAD_BATCH', payload: { tasks: big } },
+    { id: 'test-ext-id', tab: { id: 13 } }, function (r) { bigResp = r; });
+  eq('BG-53', '>300 个任务被拒绝', bigResp && bigResp.error, 'too-many');
+  eq('BG-54', '被拒后未产生下载', st10.downloads.length, 0);
+
+  var st11 = makeChromeStub();
+  loadBackground(st11);
+  var exactly300 = [];
+  for (var bi2 = 0; bi2 < 300; bi2++) exactly300.push(task('g' + bi2 + '.jpg', HOST + 'g' + bi2));
+  var okResp = null;
+  st11.listeners.message({ type: 'DOWNLOAD_BATCH', payload: { tasks: exactly300 } },
+    { id: 'test-ext-id', tab: { id: 14 } }, function (r) { okResp = r; });
+  eq('BG-55', '恰好 300 个任务被接受', okResp && okResp.accepted, 300);
+
+  /* ---- 消息来源校验 ---- */
+  H.suite('background — 消息来源校验');
+  var st12 = makeChromeStub();
+  loadBackground(st12);
+  var foreignResp = null;
+  var ret12 = st12.listeners.message({ type: 'DOWNLOAD_BATCH', payload: { tasks: [task('a.jpg', HOST + 'a')] } },
+    { id: 'other-extension', tab: { id: 15 } }, function (r) { foreignResp = r; });
+  eq('BG-56', '非本扩展来源的消息被丢弃（返回 false）', ret12, false);
+  eq('BG-57', '非本扩展来源的消息不应答', foreignResp, null);
+  await tick(3);
+  eq('BG-58', '非本扩展来源的消息不触发下载', st12.downloads.length, 0);
+
+  var ret13 = st12.listeners.message({ type: 'PING' }, {}, function () {});
+  eq('BG-59', '无 sender.id 的消息被丢弃', ret13, false);
+
+  /* ---- 消息里伪造 tabId 不被信任 ---- */
+  H.suite('background — 不信任消息内伪造的 tabId');
+  var st14 = makeChromeStub();
+  loadBackground(st14);
+  var res14 = await dispatchBatch(st14, 4242,
+    [task('a.jpg', HOST + 'a')], 'n');
+  ok('BG-60', '消息内若带 tabId 字段也不被采用（一律用 sender.tab.id）',
+    res14.messages.every(function (m) { return m.tabId === 4242; }),
+    'tabIds=' + JSON.stringify(res14.messages.map(function (m) { return m.tabId; })));
 
   /* ---- MV3 Service Worker 回收 —— 静态分析 ---- */
   H.suite('background — MV3 状态持久化静态分析');

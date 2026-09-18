@@ -34,7 +34,16 @@ FIXTURE = {
                     "imageList": [
                         {
                             "urlDefault": "http://sns-webpic-qc.xhscdn.com/202401/abc/notes_pre_post/1040g2sg31abcdefg!nd_dft_wlteh_webp_3",
-                            "stream": {"h264": [{"masterUrl": "https://sns-video-bd.xhscdn.com/live-aaa"}]},
+                            # 同一编解码器内多档分辨率 + 更高档的 h265 + 备用直链，
+                            # 用于验证「按画质降序择优」而不是「取数组第一条」
+                            "stream": {
+                                "h264": [
+                                    {"masterUrl": "https://sns-video-bd.xhscdn.com/live-720", "height": 720},
+                                    {"masterUrl": "https://sns-video-bd.xhscdn.com/live-1080", "height": 1080,
+                                     "backupUrls": ["https://sns-video-hw.xhscdn.com/live-1080-bak"]}
+                                ],
+                                "h265": [{"masterUrl": "https://sns-video-bd.xhscdn.com/live-2160", "height": 2160}]
+                            },
                             "livePhoto": True
                         },
                         {
@@ -43,7 +52,14 @@ FIXTURE = {
                     ],
                     "video": {
                         "consumer": {"originVideoKey": "spectrum/origin/video.mp4"},
-                        "media": {"stream": {"h264": [{"masterUrl": "https://sns-video-bd.xhscdn.com/stream-h264"}]}}
+                        "media": {"stream": {
+                            "h264": [
+                                {"masterUrl": "https://sns-video-bd.xhscdn.com/stream-480", "height": 480},
+                                {"masterUrl": "https://sns-video-bd.xhscdn.com/stream-1080", "height": 1080,
+                                 "backupUrls": ["https://sns-video-hw.xhscdn.com/stream-1080-bak"]}
+                            ],
+                            "av1": [{"masterUrl": "https://sns-video-bd.xhscdn.com/stream-av1", "height": 2160}]
+                        }}
                     }
                 }
             }
@@ -76,9 +92,15 @@ window.addEventListener('message', function (ev) {
       L.push('   img[' + i + '] isLive=' + im.isLive +
              ' urlOrigin=' + im.urlOrigin +
              ' liveVideoUrl=' + im.liveVideoUrl);
+      if (im.liveVideoUrls && im.liveVideoUrls.length) {
+        L.push('     liveVideoUrls(' + im.liveVideoUrls.length + ')=' + im.liveVideoUrls.join(' , '));
+      }
     });
     L.push('  video.urlOrigin=' + (n.video && n.video.urlOrigin));
     L.push('  video.urlStream=' + (n.video && n.video.urlStream));
+    if (n.video && n.video.urlStreams && n.video.urlStreams.length) {
+      L.push('  video.urlStreams(' + n.video.urlStreams.length + ')=' + n.video.urlStreams.join(' , '));
+    }
     L.push('  video.originKey=' + (n.video && n.video.originKey));
   }
 });

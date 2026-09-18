@@ -37,7 +37,12 @@ var active = null;
  * file:// / javascript: / data: 等危险 scheme，或第三方域名的文件
  * —— 否则扩展就成了「任意文件下发器」。
  */
-var ALLOWED_HOST_RE = /(^|\.)(xhscdn\.com|xhscdn\.net|xiaohongshu\.com)$/i;
+/**
+ * 小红书自家 CDN 与站点域名。
+ * rednote.com 是小红书的国际站（同步一份代码，CDN 为 sns-web-i10.rednotecdn.com），
+ * 早期白名单只认 xhscdn，会导致国际站的图片/视频直链被判定为「非本站资源」直接丢弃。
+ */
+var ALLOWED_HOST_RE = /(^|\.)(xhscdn\.com|xhscdn\.net|rednotecdn\.com|xiaohongshu\.com|rednote\.com)$/i;
 
 function isDownloadableUrl(u) {
   if (typeof u !== 'string' || !u) return false;

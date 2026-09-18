@@ -11,6 +11,7 @@
     timeFormat: 'YYYYMMDD',
     imageFormat: 'origin',
     videoQuality: 'origin',
+    streamPreference: 'compat',
     liveMode: 'both',
     dirByAuthor: false,
     dirByTitle: false,
@@ -110,7 +111,7 @@
     els.dirByTitle.checked = !!state.dirByTitle;
     els.hookEnabled.checked = state.hookEnabled !== false;
 
-    ['imageFormat', 'videoQuality', 'liveMode'].forEach(function (group) {
+    ['imageFormat', 'videoQuality', 'streamPreference', 'liveMode'].forEach(function (group) {
       var inputs = document.querySelectorAll('input[name="' + group + '"]');
       for (var i = 0; i < inputs.length; i++) {
         inputs[i].checked = inputs[i].value === state[group];
@@ -158,7 +159,7 @@
       save();
     });
 
-    ['imageFormat', 'videoQuality', 'liveMode'].forEach(function (group) {
+    ['imageFormat', 'videoQuality', 'streamPreference', 'liveMode'].forEach(function (group) {
       var inputs = document.querySelectorAll('input[name="' + group + '"]');
       for (var i = 0; i < inputs.length; i++) {
         inputs[i].addEventListener('change', function () {

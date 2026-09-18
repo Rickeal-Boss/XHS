@@ -138,6 +138,26 @@ var XHS_DL_DOWNLOADER = (function () {
   }
 
   /**
+   * 组装备用直链：候选列表 + 其他已知直链，剔除主直链与重复项。
+   * 早期实况任务的 fallbacks 恒为空数组，主直链一失败就判死；
+   * 视频也只有「另一条」备用。现在把提取阶段按画质排好序的候选全部带上。
+   */
+  function chainFallbacks(primary, candidates, extras) {
+    var out = [];
+    var seen = {};
+    if (primary) seen[primary] = 1;
+    var all = (Array.isArray(candidates) ? candidates : [])
+      .concat(Array.isArray(extras) ? extras : []);
+    for (var i = 0; i < all.length; i++) {
+      var u = all[i];
+      if (!u || seen[u]) continue;
+      seen[u] = 1;
+      out.push(u);
+    }
+    return out;
+  }
+
+  /**
    * 依据用户勾选与设置，生成下载任务列表。
    * @param {object} note 归一化后的笔记数据
    * @param {number[]} selectedIndexes 勾选的图片下标；视频用 -1 表示
@@ -155,13 +175,20 @@ var XHS_DL_DOWNLOADER = (function () {
     var liveMode = (settings && settings.liveMode) || 'both';
     var seq = 0;
 
+    // 多档直链的排序策略：compat（编解码器优先，默认）/ quality（画质优先）
+    var preferQuality = !!(settings && settings.streamPreference === 'quality');
+
     // 视频笔记：视频排在最前
     if (note.video && sel.indexOf(-1) !== -1) {
+      var vList = (preferQuality ? note.video.urlStreamsBest : note.video.urlStreams) || [];
+      if (!vList.length) vList = note.video.urlStreams || note.video.urlStreamsBest || [];
+      var vTop = vList.length ? vList[0] : (note.video.urlStream || '');
+
       var vurl = '';
       if (settings && settings.videoQuality === 'origin') {
-        vurl = note.video.urlOrigin || note.video.urlStream;
+        vurl = note.video.urlOrigin || vTop;
       } else {
-        vurl = note.video.urlStream || note.video.urlOrigin;
+        vurl = vTop || note.video.urlOrigin;
       }
       if (vurl) {
         seq++;
@@ -171,9 +198,8 @@ var XHS_DL_DOWNLOADER = (function () {
           url: vurl,
           dir: dir,
           name: (vname || 'video') + '.mp4',
-          fallbacks: [note.video.urlStream, note.video.urlOrigin].filter(function (u, i, a) {
-            return u && u !== vurl && a.indexOf(u) === i;
-          })
+          fallbacks: chainFallbacks(vurl, vList,
+            [note.video.urlStream, note.video.urlOrigin])
         });
       }
     }
@@ -185,7 +211,12 @@ var XHS_DL_DOWNLOADER = (function () {
 
       // 「仅实况视频」时不应再产出静态图任务，否则设置项名不副实
       var wantImage = liveMode !== 'video-only';
-      var wantLive = liveMode !== 'image-only' && !!img.liveVideoUrl;
+
+      // 实况视频同样按排序策略挑主直链
+      var liveList = (preferQuality ? img.liveVideoUrlsBest : img.liveVideoUrls) || [];
+      if (!liveList.length) liveList = img.liveVideoUrls || img.liveVideoUrlsBest || [];
+      var liveTop = liveList.length ? liveList[0] : (img.liveVideoUrl || '');
+      var wantLive = liveMode !== 'image-only' && !!liveTop;
 
       if (wantImage) {
         var fmt = (settings && settings.imageFormat) || 'origin';
@@ -219,10 +250,10 @@ var XHS_DL_DOWNLOADER = (function () {
       if (wantLive) {
         tasks.push({
           kind: 'live',
-          url: img.liveVideoUrl,
+          url: liveTop,
           dir: dir,
           name: base + '_live.mp4',
-          fallbacks: []
+          fallbacks: chainFallbacks(liveTop, liveList, [])
         });
       }
     });

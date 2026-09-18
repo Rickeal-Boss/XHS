@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支上连续推送时，取消尚未结束的旧运行
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }} · 语法 + 单测 + 属性测试
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 覆盖当前 LTS 与最新稳定版；扩展要求 Chrome/Edge 111+，
+        # 但这里校验的是纯 Node 逻辑，向后兼容到 18 已足够
+        node: [18, 20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 使用 Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 语法检查（全部源文件与工具）
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r f; do
+            if ! node --check "$f"; then
+              echo "::error file=$f::语法错误"
+              fail=1
+            else
+              echo "OK  $f"
+            fi
+          done < <(find src tools tests -name '*.js' -not -path '*/node_modules/*' | sort)
+          exit $fail
+
+      - name: manifest 完整性
+        run: node tools/check_manifest.js
+
+      - name: 单元测试汇总
+        run: node tests/run-all.js
+
+      - name: 属性测试 — 下载路径长度预算
+        run: node tools/check_path_budget.js
+
+      - name: 属性测试 — CDN 域名确定性 / 分散性
+        run: node tools/check_base_spread.js
+
+  manifest:
+    name: manifest 与图标资产
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: manifest 校验
+        run: node tools/check_manifest.js
+
+      - name: 校验图标为合法 PNG 且尺寸与声明一致
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, struct, sys, os
+          m = json.load(open('manifest.json', encoding='utf-8'))
+          bad = []
+          for size, rel in (m.get('icons') or {}).items():
+              if not os.path.exists(rel):
+                  bad.append(f'{rel} 不存在'); continue
+              head = open(rel, 'rb').read(24)
+              if head[:8] != b'\x89PNG\r\n\x1a\n':
+                  bad.append(f'{rel} 不是 PNG'); continue
+              w, h = struct.unpack('>II', head[16:24])
+              if (w, h) != (int(size), int(size)):
+                  bad.append(f'{rel} 实际 {w}x{h}，声明 {size}')
+              else:
+                  print(f'OK  {rel} {w}x{h}')
+          if bad:
+              print('\n'.join('FAIL ' + b for b in bad)); sys.exit(1)
+          print('图标全部通过')
+          PY
+
+  summary:
+    name: 汇总
+    runs-on: ubuntu-latest
+    needs: [test, manifest]
+    if: always()
+    steps:
+      - name: 判定
+        run: |
+          if [ "${{ needs.test.result }}" = "success" ] && [ "${{ needs.manifest.result }}" = "success" ]; then
+            echo "### :white_check_mark: CI 通过" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### :x: CI 失败" >> "$GITHUB_STEP_SUMMARY"
+            echo "- test: ${{ needs.test.result }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- manifest: ${{ needs.manifest.result }}" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

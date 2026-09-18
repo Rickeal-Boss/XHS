@@ -51,6 +51,13 @@
         <label><input type="radio" name="videoQuality" value="origin"><span><b>原画质</b><i>使用 origin_video_key 直链，码率最高（推荐）</i></span></label>
         <label><input type="radio" name="videoQuality" value="default"><span><b>常规流</b><i>使用页面播放用的 H.264 流，兼容性最好</i></span></label>
       </div>
+
+      <h3>同一条流有多档时如何选</h3>
+      <p class="desc">小红书有时会同时给出多个分辨率/编解码器的直链，这里决定优先用哪一条。</p>
+      <div class="radios" id="streamPreference">
+        <label><input type="radio" name="streamPreference" value="compat"><span><b>兼容性优先（推荐）</b><i>先挑 H.264，同一编解码器内选分辨率最高的</i></span></label>
+        <label><input type="radio" name="streamPreference" value="quality"><span><b>画质优先</b><i>跨编解码器按分辨率→码率→体积排序取最高，可能选中 H.265/AV1，老旧播放器可能打不开</i></span></label>
+      </div>
     </section>
 
     <!-- ------------------------- 实况 ------------------------- -->

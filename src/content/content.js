@@ -19,6 +19,8 @@
     timeFormat: 'YYYYMMDD',
     imageFormat: 'origin',
     videoQuality: 'origin',
+    // 多档直链的排序策略：compat=编解码器兼容性优先(h264 最稳)，quality=画质优先
+    streamPreference: 'compat',
     liveMode: 'both',
     dirByAuthor: false,
     dirByTitle: false,
@@ -38,7 +40,8 @@
    * 校验：URL 必须是 http(s) 且落在小红书自有域名内，字符串要限长。
    * 这同时也挡住了「把扩展当通用下载器」的滥用路径。
    */
-  var ALLOWED_HOST_RE = /(^|\.)(xhscdn\.com|xhscdn\.net|xiaohongshu\.com)$/i;
+  /** 与 background.js 保持一致：含国际站 rednote.com 及其 CDN */
+  var ALLOWED_HOST_RE = /(^|\.)(xhscdn\.com|xhscdn\.net|rednotecdn\.com|xiaohongshu\.com|rednote\.com)$/i;
   var MAX_IMAGES = 200;
   var MAX_LEN = { title: 300, desc: 5000, nickname: 100, ipLocation: 50, noteId: 64 };
 
@@ -52,6 +55,20 @@
     } catch (e) {
       return '';
     }
+  }
+
+  /** URL 数组白名单：逐条过 safeUrl，去重并限长 */
+  function safeUrlList(arr, max) {
+    if (!Array.isArray(arr)) return [];
+    var out = [];
+    var seen = {};
+    for (var i = 0; i < arr.length && out.length < max; i++) {
+      var u = safeUrl(arr[i]);
+      if (!u || seen[u]) continue;
+      seen[u] = 1;
+      out.push(u);
+    }
+    return out;
   }
 
   function safeStr(s, max) {
@@ -103,6 +120,9 @@
         urlOrigin: urlOrigin,
         urlJpg: urlJpg,
         liveVideoUrl: live,
+        // 实况视频的备用直链，供下载失败时重试；上限 6 条，逐条过 URL 白名单
+        liveVideoUrls: safeUrlList(img.liveVideoUrls, 6),
+        liveVideoUrlsBest: safeUrlList(img.liveVideoUrlsBest, 6),
         isLive: !!(live || img.isLive),
         width: Number(img.width) || 0,
         height: Number(img.height) || 0
@@ -117,6 +137,9 @@
           urlOrigin: vOrigin,
           originKey: safeStr(raw.video.originKey, 200),
           urlStream: vStream,
+          // 按画质降序的备用直链（原画质失败时逐条降级）
+          urlStreams: safeUrlList(raw.video.urlStreams, 6),
+          urlStreamsBest: safeUrlList(raw.video.urlStreamsBest, 6),
           cover: safeUrl(raw.video.cover),
           duration: Number(raw.video.duration) || 0
         };
