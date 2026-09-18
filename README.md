@@ -6,6 +6,7 @@
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-ff2442)](https://developer.chrome.com/docs/extensions/mv3/)
 [![Permissions](https://img.shields.io/badge/permissions-downloads%20%2B%20storage-1a9e5c)](#权限说明)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![CI](https://github.com/Rickeal-Boss/XHS/actions/workflows/ci.yml/badge.svg)](https://github.com/Rickeal-Boss/XHS/actions/workflows/ci.yml)
 
 ---
 
@@ -26,9 +27,12 @@
 ## 功能
 
 - **图片**：原图直链（换 CDN 域名重拼 `fileKey`，无损）/ 常规压缩图 / 强制 JPG 三档
-- **视频**：原画质（`origin_video_key` 直链）/ 页面播放流（H.264，兼容性优先）两档
-- **实况照片**：静态图 + 配套短视频成对下载，视频以 `_live` 结尾便于配对排序
+- **视频**：原画质（`origin_video_key` 直链）/ 页面播放流两档
+- **多档直链择优**：同一笔记出现多个分辨率/编解码器时，可选「兼容性优先」（H.264 最稳，默认）或「画质优先」（跨编解码器取最高，可能选中 H.265/AV1，老旧播放器可能打不开）
+- **实况照片**：静态图 + 配套短视频成对下载，视频以 `_live` 结尾便于配对排序；短视频走完整的备用直链重试链
+- **国际站**：兼容 `www.rednote.com`（小红书海外版，CDN 域名 `sns-web-i10.rednotecdn.com`）
 - **批量**：单条笔记全选 / 反选 / 勾选任意组合
+- **可中断**：下载一批时点「取消」立即停止后续任务
 - **命名**：8 个占位符自由组合模板，实时预览效果
 - **目录**：可指定根目录，可按作者昵称 / 笔记标题自动建子目录
 - **其他**：下载进度（字节级）、失败自动换备用直链重试、同一会话内重复文件自动跳过、复制全部直链、导出元数据 JSON
@@ -175,7 +179,8 @@
     ├── shot_options.py        设置页渲染截图（无头 Edge）
     ├── test_bridge.py         消息桥与提取引擎的真实浏览器验证（无头 Edge）
     ├── check_path_budget.js   buildPath 长度预算的属性测试
-    └── check_base_spread.js   pickBase 的 CDN 域名分布检查
+    ├── check_base_spread.js   pickBase 的 CDN 域名分布检查
+    └── check_manifest.js      manifest.json 与图标资产完整性
 ```
 
 ### 运行测试
@@ -184,10 +189,15 @@
 node tests/test-downloader.js
 node tests/test-background.js
 node tests/test-extractor.js
+node tests/test-static.js
+
+# 汇总运行（任一失败非零退出码）
+node tests/run-all.js
 
 # 不变式 / 属性测试
-node tools/check_path_budget.js    # 3304 项断言：路径长度上限、扩展名保留、无空段、段尾无点空格
-node tools/check_base_spread.js    # 确定性 + 分散性：同一 key 稳定、不同 key 分散到多个 CDN
+node tools/check_path_budget.js    # 路径长度上限、扩展名保留、无空段、段尾无点空格
+node tools/check_base_spread.js    # 确定性 + 分散性
+node tools/check_manifest.js       # manifest / 图标 / 权限一致性
 ```
 
 全部为纯 Node 脚本，不需要安装任何依赖。`tools/test_bridge.py` 需要本机 Edge，在真实浏览器里验证 MAIN world ↔ 隔离世界的消息桥与三条提取路径（原图重拼 / 原视频 / 实况视频）：
@@ -195,6 +205,10 @@ node tools/check_base_spread.js    # 确定性 + 分散性：同一 key 稳定�
 ```bash
 python tools/test_bridge.py
 ```
+
+### CI
+
+每次 push / PR 都会跑 `.github/workflows/ci.yml`：Node 18/20/22 矩阵上依次执行语法检查、manifest 完整性、单元测试汇总、属性测试；独立 job 校验图标是合法 PNG 且尺寸与声明一致。
 
 ### 两个关键不变式
 
