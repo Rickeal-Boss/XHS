@@ -464,6 +464,14 @@
         break;
 
       case 'RESCAN_DONE':
+        // 读不到数据时把诊断快照打到控制台：现场问题在沙箱里复现不了，
+        // 让用户复制这一行比继续猜要快得多
+        if (!d.payload || !d.payload.ok) {
+          try {
+            console.warn('[XHS-DL 诊断] 未能从页面读到笔记数据，诊断信息：',
+              JSON.stringify(d.payload && d.payload.diag, null, 2));
+          } catch (e) { /* 忽略 */ }
+        }
         if (!current) {
           tryDomFallback();
           if (!current) XHS_DL_UI.toast('没有识别到笔记数据', 'error');

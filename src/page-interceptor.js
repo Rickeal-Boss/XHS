@@ -61,7 +61,15 @@
   var BINARY_HINTS = ['.mp4', '.webm', '.m3u8', '.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.mov'];
 
   var MAX_DEPTH = 12;
-  var MAX_NODES = 20000;
+  /**
+   * 深度扫描的节点上限。旧值 20000 在 explore 页的大号 __INITIAL_STATE__
+   * 上会提前 break，导致 note 容器根本没被访问到（表现为"读取不到页面数据"）。
+   * 现在已知路径直取是主路径，全树扫描退化为兜底，因此可以把预算放宽；
+   * 同时用 SCAN_BUDGET_MS 做时间硬顶，避免极端状态把页面卡死 ——
+   * 光靠节点数无法界定真实耗时（取决于对象大小）。
+   */
+  var MAX_NODES = 200000;
+  var SCAN_BUDGET_MS = 250;
 
   /**
    * 已知的非笔记对象类型。
@@ -391,6 +399,9 @@
       var node = cur.node;
       if (!isObj(node)) continue;
       if (stats.visited++ > MAX_NODES) break;
+      // 时间硬顶：节点数相同但对象大小差异很大，只有墙钟时间能界定真实开销
+      if (stats.startedAt && (stats.visited & 0x3FF) === 0 &&
+          Date.now() - stats.startedAt > SCAN_BUDGET_MS) break;
       if (cur.depth > MAX_DEPTH) continue;
 
       if (Array.isArray(node)) {
@@ -499,14 +510,82 @@
     } catch (e) { /* 忽略：不影响宿主页面 */ }
   }
 
+  /**
+   * 按已知容器 O(1) 直取笔记。
+   *
+   * 这是「未能读取页面数据、降级到 DOM 兜底」的主要根因所在：
+   * explore 页的 __INITIAL_STATE__ 极大（feed、评论、相关推荐全在里面），
+   * 而 collectNotes 是 LIFO 深度遍历（stack.pop），note 容器往往是
+   * __INITIAL_STATE__ 的靠前 key，会被**最后**才展开；MAX_NODES 预算
+   * 一旦耗光就 break 掉整个扫描，note 还没被访问到 —— 于是读不到数据。
+   * 参考实现（XHS-Downloader 12.7k★ 的配套油猴脚本）就是直接按
+   *   initialState.note.noteDetailMap[noteId].note
+   * 取，不跑全树扫描。这里照做，命中就不必跑昂贵的全树遍历。
+   */
+  function pickFromKnownPaths(state) {
+    if (!isObj(state)) return null;
+    var want = currentNoteId();
+
+    // 形态 A：note.noteDetailMap[noteId].note
+    var noteRoot = get(state, 'note');
+    var map = isObj(noteRoot) ? get(noteRoot, 'note_detail_map') : null;
+    if (isObj(map)) {
+      if (want && isObj(map[want])) {
+        var hit = get(map[want], 'note');
+        if (isObj(hit)) return hit;
+      }
+      // 未命中当前 noteId 时取最后一条，与参考实现一致
+      var keys = Object.keys(map);
+      for (var i = keys.length - 1; i >= 0; i--) {
+        if (!isObj(map[keys[i]])) continue;
+        var n = get(map[keys[i]], 'note');
+        if (isObj(n)) return n;
+      }
+    }
+
+    // 形态 B：noteData.data.noteData
+    var nd = get(state, 'note_data');
+    if (isObj(nd)) {
+      var d = get(nd, 'data');
+      if (isObj(d)) {
+        var n2 = get(d, 'note_data');
+        if (isObj(n2)) return n2;
+      }
+    }
+
+    return null;
+  }
+
+  /** 最近一次扫描的统计，供诊断使用 */
+  var lastScan = { visited: 0, found: 0, source: '', directHit: false, ms: 0 };
+
   function emitNotes(rawRoot, source) {
+    // 先按已知路径直取，命中即返回，避免在大号状态上做全树扫描
+    var direct = pickFromKnownPaths(rawRoot);
+    if (direct) {
+      var fast = toNoteData(direct, source);
+      if (fast) {
+        lastScan = { visited: 1, found: 1, source: source, directHit: true, ms: 0 };
+        post('NOTE', fast);
+        return;
+      }
+    }
+
     var bag = Object.create(null);
-    var stats = { visited: 0 };
+    var stats = { visited: 0, startedAt: Date.now() };
     try {
       collectNotes(rawRoot, bag, stats);
     } catch (e) {
+      lastScan = { visited: stats.visited, found: 0, source: source, directHit: false, ms: -1 };
       return;
     }
+    lastScan = {
+      visited: stats.visited,
+      found: Object.keys(bag).length,
+      source: source,
+      directHit: false,
+      ms: Date.now() - stats.startedAt
+    };
     var notes = Object.keys(bag).map(function (k) { return bag[k]; });
     if (!notes.length) return;
 
@@ -733,11 +812,71 @@
 
   /* ======================== 消息桥（请求-响应） ======================== */
 
+  /**
+   * 诊断快照。
+   *
+   * 「未能读取页面数据」这类现场问题的成因在沙箱里无法复现（合成 fixture
+   * 无论 key 顺序、无论预算大小都能读到），与其继续猜测，不如让扩展自己
+   * 把状态形状吐出来：用户在控制台复制这一行就能定位到底卡在哪一环。
+   */
+  function diagSnapshot() {
+    var d = {
+      noteId: currentNoteId(),
+      href: '',
+      hookInstalled: !!(hooks && hooks.installed),
+      hasState: false,
+      stateType: '',
+      stateKeys: [],
+      hasNoteContainer: false,
+      hasDetailMap: false,
+      detailMapKeys: [],
+      inlineScriptCount: 0,
+      scan: lastScan,
+      maxNodes: MAX_NODES,
+      budgetMs: SCAN_BUDGET_MS
+    };
+    try { d.href = location.href; } catch (e) { /* 忽略 */ }
+    try {
+      var st = window.__INITIAL_STATE__;
+      d.hasState = !!st;
+      if (st && typeof st === 'object') {
+        d.stateType = Array.isArray(st) ? 'array' : 'object';
+        d.stateKeys = Object.keys(st).slice(0, 40);
+        var noteRoot = get(st, 'note');
+        d.hasNoteContainer = isObj(noteRoot);
+        var map = isObj(noteRoot) ? get(noteRoot, 'note_detail_map') : null;
+        d.hasDetailMap = isObj(map);
+        if (isObj(map)) d.detailMapKeys = Object.keys(map).slice(0, 10);
+        // 形态 B
+        var nd = get(st, 'note_data');
+        if (isObj(nd) && isObj(get(nd, 'data')) && isObj(get(get(nd, 'data'), 'note_data'))) {
+          d.hasNoteDataPath = true;
+        }
+      }
+    } catch (e) {
+      d.stateError = String(e && e.message || e);
+    }
+    try {
+      var sc = document.querySelectorAll('script');
+      for (var i = 0; i < sc.length; i++) {
+        if (sc[i].textContent && sc[i].textContent.indexOf('__INITIAL_STATE__') !== -1) {
+          d.inlineScriptCount++;
+        }
+      }
+    } catch (e) { /* 忽略 */ }
+    return d;
+  }
+
   function respondRescan() {
     var ok = scanInitialState('rescan');
     if (!ok) scanInlineScript();
     post('MEDIA_HINTS', { videos: mediaSink.videos.slice() });
-    post('RESCAN_DONE', { noteId: currentNoteId(), ok: ok, hookActive: hooks.installed });
+    post('RESCAN_DONE', {
+      noteId: currentNoteId(),
+      ok: ok,
+      hookActive: hooks.installed,
+      diag: diagSnapshot()
+    });
   }
 
   window.addEventListener('message', function (ev) {
