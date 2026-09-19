@@ -33,7 +33,14 @@ var XHS_DL_UI = (function () {
 
   function setCommentMedia(items) {
     commentMedia = items || [];
+    // 保留已有勾选：新评论陆续到达时会多次调用本函数，
+    // 早期实现每次都清空 commentSel，用户刚勾的会被冲掉。
+    // 这里按 key 保留在新列表里依然存在的项。
+    var prev = commentSel;
     commentSel = Object.create(null);
+    commentItems().forEach(function (it) {
+      if (prev[it.key]) commentSel[it.key] = 1;
+    });
     render();
   }
 

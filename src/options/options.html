@@ -60,6 +60,19 @@
       </div>
     </section>
 
+    <!-- --------------------- 评论区媒体 --------------------- -->
+    <section class="card">
+      <h2>评论区（图片 / 语音）</h2>
+      <p class="desc">面板底部的「评论区」分区会列出评论附带的图片与语音消息，默认不勾选，勾了才下载，统一落在 <code>&lt;保存目录&gt;/评论/</code> 下。</p>
+      <p class="desc" style="margin-top:8px">
+        <b>关于语音格式：</b>小红书把评论语音以 <b>MP4 容器</b>分发（走 <code>sns-video-v2.xhscdn.com</code>，
+        不存在独立的 sns-voice 域名）。本扩展按 URL 真实后缀命名（多为 <code>.m4a</code>），
+        <b>但文件内容仍是 MP4</b> —— 扩展没有服务端转码能力，无法把它改成真正的音频码流。
+        文件可以当音频正常播放；若需严格音频封装，请用本地 ffmpeg 转一次：
+        <br><code>ffmpeg -i 输入.m4a -c:a copy 输出.m4a</code>
+      </p>
+    </section>
+
     <!-- ------------------------- 实况 ------------------------- -->
     <section class="card">
       <h2>实况照片（Live Photo）</h2>

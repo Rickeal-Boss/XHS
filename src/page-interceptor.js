@@ -530,11 +530,20 @@
     var noteRoot = get(state, 'note');
     var map = isObj(noteRoot) ? get(noteRoot, 'note_detail_map') : null;
     if (isObj(map)) {
-      if (want && isObj(map[want])) {
-        var hit = get(map[want], 'note');
-        if (isObj(hit)) return hit;
+      if (want) {
+        // ⚠️ URL 能取到 noteId 时**只认这一条**。
+        // 早期实现在这里「取最后一条」（照抄参考实现），但 noteDetailMap 里
+        // 常残留上一篇笔记的条目 —— 返回别的 noteId 会被 content.js 的
+        // SPA 串台防护直接 return 掉，于是拦截器报"成功"、面板却空着，
+        // 最终静默降级到 DOM。这正是"刷新救不回来"的真凶。
+        if (isObj(map[want])) {
+          var hit = get(map[want], 'note');
+          if (isObj(hit)) return hit;
+        }
+        // 命中不了就交给后面的全树扫描（emitNotes 里带 URL 匹配逻辑）
+        return null;
       }
-      // 未命中当前 noteId 时取最后一条，与参考实现一致
+      // 没有 URL noteId（首页 feed 等）时才退化为"取最后一条"
       var keys = Object.keys(map);
       for (var i = keys.length - 1; i >= 0; i--) {
         if (!isObj(map[keys[i]])) continue;
@@ -649,7 +658,10 @@
         // 内联 JSON 里可能含 undefined，替换后才能 parse
         var json = m[1].replace(/:\s*undefined\b/g, ':null');
         try {
-          if (emitNotes(JSON.parse(json), 'inline-script')) return true;
+          var parsed = JSON.parse(json);
+          // 评论区媒体同样从内联 script 里抠（刷新按钮走的就是这条路径）
+          emitCommentMedia(parsed);
+          if (emitNotes(parsed, 'inline-script')) return true;
         } catch (e) { /* 单个 script 解析失败不影响其他 */ }
       }
     } catch (e) { /* 忽略 */ }
@@ -928,7 +940,20 @@
       var obj = JSON.parse(text);
       emitNotes(obj, 'api:' + url.split('?')[0].slice(-40));
       // 评论接口（/api/sns/web/v2/comment/page）的响应同样走这里
-      emitCommentMedia(obj);
+      var cmtOk = emitCommentMedia(obj);
+      // 诊断：评论接口有没有被接到、响应长什么样、取出多少
+      if (url && url.toLowerCase().indexOf('comment') !== -1) {
+        try {
+          var d0 = obj && obj.data;
+          var arr = (d0 && (d0.comments || d0.comment_list)) || obj.comments || obj.comment_list || [];
+          console.log('[XHS-DL 诊断] 评论接口 ' + url.split('?')[0] +
+            ' | 顶层键=' + Object.keys(obj || {}).join(',') +
+            ' | data键=' + (d0 ? Object.keys(d0).join(',') : '-') +
+            ' | comments数=' + (Array.isArray(arr) ? arr.length : 0) +
+            ' | 首条键=' + (Array.isArray(arr) && arr[0] ? Object.keys(arr[0]).join(',') : '-') +
+            ' | 提取=' + (cmtOk ? '有' : '无'));
+        } catch (e) { /* 忽略 */ }
+      }
     } catch (e) { /* 非 JSON，忽略 */ }
   }
 
@@ -1073,7 +1098,10 @@
 
   function respondRescan() {
     var ok = scanInitialState('rescan');
-    if (!ok) ok = scanInlineScript();
+    // 刷新时无条件再跑一次内联 script 扫描：用户点「刷新」通常是因为
+    // 面板数据不对，此时多扫一条路径成本很低，但能救回 INITIAL_STATE
+    // 已被 SPA 替换 / 尚未就绪的情况。
+    ok = scanInlineScript() || ok;
     post('MEDIA_HINTS', { videos: mediaSink.videos.slice() });
     post('RESCAN_DONE', {
       noteId: currentNoteId(),
@@ -1123,6 +1151,10 @@
 
   setTimeout(function () { scanInitialState('delay-1500'); }, 1500);
   setTimeout(function () { scanInitialState('delay-4000'); scanInlineScript(); }, 4000);
+  // 补一次更晚的扫描：XHS 偶发在 4s 之后才注入 __INITIAL_STATE__
+  // （慢网络 / 大 feed），之前只有 1.5s 与 4s 两次机会，错过就只能
+  // 靠用户手动刷页面。多扫一次成本极低，能显著降低 DOM 降级率。
+  setTimeout(function () { scanInitialState('delay-9000'); scanInlineScript(); }, 9000);
 
   // SPA 路由切换：URL 变化后重新扫描
   var lastHref = location.href;
