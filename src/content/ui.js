@@ -10,7 +10,8 @@ var XHS_DL_UI = (function () {
     close: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
     gear: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
     check: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="m4 12 5 5L20 6"/></svg>',
-    empty: '<svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-4.5-4.5L7 20"/></svg>'
+    empty: '<svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-4.5-4.5L7 20"/></svg>',
+    audio: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>'
   };
 
   var shadow = null;
@@ -22,6 +23,75 @@ var XHS_DL_UI = (function () {
   var busy = false;
   var pos = { left: null, top: null };
   var mediaHints = { videos: [] };
+
+  /* 评论区媒体：独立分区、独立勾选。
+     默认不勾选 —— 评论可能几十上百条，自动全选会把下载目录刷爆。 */
+  var commentMedia = [];
+  var commentSel = Object.create(null);
+
+  function setCommentMedia(items) {
+    commentMedia = items || [];
+    commentSel = Object.create(null);
+    render();
+  }
+
+  /** 展开成扁平条目：key 形如 c:<commentId>:i:<n>（图片）/ :a:<n>（语音） */
+  function commentItems() {
+    var out = [];
+    for (var i = 0; i < commentMedia.length; i++) {
+      var c = commentMedia[i];
+      var j;
+      for (j = 0; j < c.images.length; j++) {
+        out.push({ key: 'c:' + c.commentId + ':i:' + j, kind: 'image', url: c.images[j], comment: c, seq: j });
+      }
+      for (j = 0; j < c.audios.length; j++) {
+        out.push({ key: 'c:' + c.commentId + ':a:' + j, kind: 'audio', url: c.audios[j], comment: c, seq: j });
+      }
+    }
+    return out;
+  }
+
+  function selectedCommentItems() {
+    return commentItems().filter(function (it) { return !!commentSel[it.key]; });
+  }
+
+  function renderComments() {
+    if (!commentMedia.length) return '';
+    var items = commentItems();
+    var selCount = selectedCommentItems().length;
+    var h = [];
+    h.push('<div class="xhs-dl-sec">');
+    h.push('<div class="xhs-dl-sec-hd">');
+    h.push('<label class="xhs-dl-sec-all"><input type="checkbox" data-act="cmt-all"' +
+      (selCount === items.length && items.length ? ' checked' : '') +
+      '><span>评论区（' + items.length + ' 项' + (selCount ? '，已选 ' + selCount : '') + '）</span></label>');
+    h.push('</div><div class="xhs-dl-grid">');
+    items.forEach(function (it) {
+      var on = !!commentSel[it.key];
+      var tag = it.kind === 'audio' ? '<span class="xhs-dl-tag is-audio">语音</span>' : '';
+      var inner = it.kind === 'audio'
+        ? '<div class="xhs-dl-ph is-audio">' + ICON.audio + '</div>'
+        : '<img src="' + esc(it.url) + '" referrerpolicy="no-referrer" loading="lazy" alt="">';
+      h.push('<div class="xhs-dl-item' + (on ? ' is-checked' : '') + '" data-ckey="' + esc(it.key) + '">' +
+        tag + '<span class="xhs-dl-tick">' + ICON.check + '</span>' + inner + '</div>');
+    });
+    h.push('</div></div>');
+    return h.join('');
+  }
+
+  function toggleCommentKey(key) {
+    if (commentSel[key]) delete commentSel[key];
+    else commentSel[key] = 1;
+    render();
+  }
+
+  function toggleCommentAll() {
+    var items = commentItems();
+    var allOn = items.length && selectedCommentItems().length === items.length;
+    commentSel = Object.create(null);
+    if (!allOn) items.forEach(function (it) { commentSel[it.key] = 1; });
+    render();
+  }
 
   /* --------------------------- 工具 --------------------------- */
 
@@ -135,7 +205,10 @@ var XHS_DL_UI = (function () {
 
     els.panel.addEventListener('click', onPanelClick);
     els.panel.addEventListener('change', function (e) {
-      if (e.target && e.target.getAttribute('data-act') === 'all') onCheckAllChange();
+      if (!e.target) return;
+      var a = e.target.getAttribute('data-act');
+      if (a === 'all') onCheckAllChange();
+      else if (a === 'cmt-all') toggleCommentAll();
     });
     els.mask.addEventListener('click', close);
   }
@@ -143,9 +216,18 @@ var XHS_DL_UI = (function () {
   function onPanelClick(ev) {
     var target = ev.target;
 
+    // 0) 评论区条目：同样复用 .xhs-dl-item，但用 data-ckey 区分。
+    //    必须排在笔记卡片之前判断 —— 否则 Number(null) 会退化成 0，
+    //    点评论区任意一项都会错误地切换笔记第 1 张图的勾选。
+    var citem = target.closest ? target.closest('[data-ckey]') : null;
+    if (citem) {
+      toggleCommentKey(citem.getAttribute('data-ckey'));
+      return;
+    }
+
     // 1) 媒体卡片：切换勾选（优先判断，卡片内部不含 data-act 元素）
     var item = target.closest ? target.closest('.xhs-dl-item') : null;
-    if (item) {
+    if (item && item.getAttribute('data-idx') !== null) {
       toggleIndex(Number(item.getAttribute('data-idx')));
       return;
     }
@@ -296,6 +378,8 @@ var XHS_DL_UI = (function () {
   function clearNote() {
     note = null;
     selected = [];
+    commentMedia = [];
+    commentSel = Object.create(null);
     render();
   }
 
@@ -389,15 +473,21 @@ var XHS_DL_UI = (function () {
       );
     });
 
-    els.body.innerHTML = '<div class="xhs-dl-grid">' + html.join('') + '</div>';
+    els.body.innerHTML = '<div class="xhs-dl-grid">' + html.join('') + '</div>' + renderComments();
+  }
+
+  /** 笔记勾选 + 评论区勾选的总数 */
+  function totalSelected() {
+    return selected.length + selectedCommentItems().length;
   }
 
   function renderFoot() {
     var has = !!note && (note.images.length > 0 || !!note.video);
-    els.dlBtn.disabled = busy || selected.length === 0;
+    var n = totalSelected();
+    els.dlBtn.disabled = busy || n === 0;
     els.dlBtn.textContent = busy
       ? '下载中…'
-      : (selected.length ? '下载选中（' + selected.length + ' 项）' : '请先选择要下载的内容');
+      : (n ? '下载选中（' + n + ' 项）' : '请先选择要下载的内容');
     if (els.copyBtn) els.copyBtn.disabled = !has;
     if (els.jsonBtn) els.jsonBtn.disabled = !has;
   }
@@ -474,6 +564,8 @@ var XHS_DL_UI = (function () {
     setPosition: function (p) { if (p) { pos = p; applyPosition(); } },
     setBusy: setBusy,
     isBusy: isBusy,
+    setCommentMedia: setCommentMedia,
+    selectedCommentItems: selectedCommentItems,
     setProgress: setProgress,
     hideProgress: hideProgress,
     setBadge: setBadge,

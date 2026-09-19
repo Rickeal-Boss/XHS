@@ -158,6 +158,49 @@ var XHS_DL_DOWNLOADER = (function () {
   }
 
   /**
+   * 评论区媒体（图片 / 语音）任务。
+   *
+   * 目录：统一落到 baseDir/评论/ 下，避免和笔记主体文件混在一起。
+   * 语音的容器是 **MP4**（小红书用 sns-video 系域名分发音频，不存在
+   * sns-voice 域名，也不是 m4a/mp3），所以扩展名按 .mp4 落，
+   * 文件名带 _voice 后缀以便识别；有语音转写文字（asrText）时优先用它命名。
+   */
+  function buildCommentTasks(items, settings) {
+    var tasks = [];
+    if (!Array.isArray(items) || !items.length) return tasks;
+
+    var root = String((settings && settings.baseDir) || '小红书下载').replace(/^[\\/]+|[\\/]+$/g, '');
+    var dir = (root ? root + '/' : '') + '评论/';
+
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (!it || !it.url) continue;
+      var c = it.comment || {};
+      var who = sanitize(c.author || '') || sanitize(c.commentId || '') || '匿名';
+      if (it.kind === 'audio') {
+        var label = c.asrText ? sanitize(String(c.asrText).slice(0, 40)) : (who + '_' + (it.seq + 1));
+        if (!label) label = who + '_' + (it.seq + 1);
+        tasks.push({
+          kind: 'comment-audio',
+          url: it.url,
+          dir: dir,
+          name: label + '_voice.mp4',
+          fallbacks: []
+        });
+      } else {
+        tasks.push({
+          kind: 'comment-image',
+          url: it.url,
+          dir: dir,
+          name: who + '_' + (it.seq + 1) + guessExt(it.url, '.jpg'),
+          fallbacks: []
+        });
+      }
+    }
+    return tasks;
+  }
+
+  /**
    * 依据用户勾选与设置，生成下载任务列表。
    * @param {object} note 归一化后的笔记数据
    * @param {number[]} selectedIndexes 勾选的图片下标；视频用 -1 表示
@@ -269,6 +312,7 @@ var XHS_DL_DOWNLOADER = (function () {
     sanitize: sanitize,
     renderName: renderName,
     buildTasks: buildTasks,
+    buildCommentTasks: buildCommentTasks,
     guessExt: guessExt
   };
 })();

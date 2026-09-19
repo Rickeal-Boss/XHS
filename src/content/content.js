@@ -30,6 +30,7 @@
 
   var settings = Object.assign({}, DEFAULT_SETTINGS);
   var current = null;          // 当前笔记（归一化后的 NoteData）
+  var commentMedia = [];       // 评论区媒体（图片 / 语音音频）
   var mediaHints = { videos: [] };
   var hookDisabledNotified = false;
 
@@ -67,6 +68,32 @@
       if (!u || seen[u]) continue;
       seen[u] = 1;
       out.push(u);
+    }
+    return out;
+  }
+
+  /**
+   * 评论区媒体白名单。
+   * 与 sanitizeNote 一样：页面世界的数据可被页面自身脚本伪造，
+   * 所有 URL 必须过域名白名单，文本必须过 safeStr。
+   */
+  function sanitizeCommentMedia(items) {
+    if (!Array.isArray(items)) return [];
+    var out = [];
+    for (var i = 0; i < items.length && out.length < 200; i++) {
+      var it = items[i];
+      if (!it || typeof it !== 'object') continue;
+      var images = safeUrlList(it.images, 12);
+      var audios = safeUrlList(it.audios, 12);
+      if (!images.length && !audios.length) continue;
+      out.push({
+        commentId: safeStr(it.commentId, 64),
+        author: safeStr(it.author, 40),
+        images: images,
+        audios: audios,
+        asrText: safeStr(it.asrText, 120),
+        duration: Number(it.duration) || 0
+      });
     }
     return out;
   }
@@ -327,8 +354,10 @@
 
   function clearNote() {
     current = null;
+    commentMedia = [];
     mediaHints = { videos: [] };
     XHS_DL_UI.clearNote();
+    XHS_DL_UI.setCommentMedia([]);
     XHS_DL_UI.setBadge(0);
     // 切笔记 / 重置时把上一次的进度/失败 toast 也清掉，避免"33 个失败"
     // 之类旧状态误导用户。clearNote 是唯一入口，在此处清是最稳的。
@@ -479,6 +508,17 @@
         break;
       }
 
+      case 'COMMENT_MEDIA': {
+        var items = sanitizeCommentMedia(d.payload && d.payload.items);
+        if (!items.length) break;
+        // 多次分页响应会陆续到达，按 commentId 去重后合并
+        var byId = Object.create(null);
+        commentMedia.concat(items).forEach(function (it) { byId[it.commentId] = it; });
+        commentMedia = Object.keys(byId).map(function (k) { return byId[k]; });
+        XHS_DL_UI.setCommentMedia(commentMedia);
+        break;
+      }
+
       case 'HOOK_DISABLED':
         if (!hookDisabledNotified && d.payload && d.payload.reason === 'video-error') {
           hookDisabledNotified = true;
@@ -527,6 +567,11 @@
       return;
     }
     var tasks = XHS_DL_DOWNLOADER.buildTasks(note, selected, settings);
+    // 评论区媒体（图片 / 语音）：默认不勾选，勾了才追加任务
+    var cmt = XHS_DL_UI.selectedCommentItems();
+    if (cmt.length) {
+      tasks = tasks.concat(XHS_DL_DOWNLOADER.buildCommentTasks(cmt, settings));
+    }
     if (!tasks.length) {
       XHS_DL_UI.toast('没有可下载的内容', 'error');
       return;

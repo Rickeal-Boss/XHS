@@ -626,6 +626,7 @@
     try {
       var state = window.__INITIAL_STATE__;
       if (!state) return false;
+      emitCommentMedia(state);
       return emitNotes(state, 'initial-state');
     } catch (e) {
       return false;
@@ -653,6 +654,161 @@
       }
     } catch (e) { /* 忽略 */ }
     return false;
+  }
+
+  /* ====================== 评论区媒体（图片 / 语音） ====================== */
+
+  /**
+   * 评论区图片与语音消息。
+   *
+   * 真实字段名（由调研确认，与直觉不同，务必按此实现）：
+   *   评论图片：comment.pictures[*].info_list[*].url
+   *   评论语音：comment.audioInfo.playInfo.url
+   *             （snake_case 别名 audio_info.play_info.url）
+   *   —— 注意不是 voice / voice_url / voice_info。
+   *      Apify 等平台输出里的 voice_info、voice_duration_seconds 是它们
+   *      自己的归一化字段，不是小红书原始字段，照着实现会永远取不到。
+   *
+   * 语音走 sns-video-v2.xhscdn.com（与视频共用 sns-video 系域名，
+   * 不存在 sns-voice 域名），容器是 MP4 而非 m4a，需转码才能当音频用。
+   *
+   * 该功能 2025-07 内测、08 放量，字段仍在演进，因此 camelCase /
+   * snake_case 双写都兼容，并对每一层做空值兜底。
+   */
+
+  function uniqUrls(arr) {
+    var out = [];
+    var seen = Object.create(null);
+    for (var i = 0; i < arr.length; i++) {
+      var u = str(arr[i]);
+      if (!u || seen[u]) continue;
+      seen[u] = 1;
+      out.push(u);
+    }
+    return out;
+  }
+
+  function pickImgUrl(o) {
+    if (!isObj(o)) return '';
+    return str(get(o, 'url')) || str(get(o, 'url_default')) || str(get(o, 'url_pre')) || '';
+  }
+
+  function commentImages(c) {
+    var out = [];
+    var pics = get(c, 'pictures') || get(c, 'images') || get(c, 'image_list');
+    if (!Array.isArray(pics)) return out;
+    for (var i = 0; i < pics.length; i++) {
+      var p = pics[i];
+      if (!isObj(p)) continue;
+      // 主路径：pictures[*].info_list[*].url
+      var info = get(p, 'info_list');
+      if (Array.isArray(info)) {
+        for (var j = 0; j < info.length; j++) out.push(pickImgUrl(info[j]));
+      }
+      // 兜底：图片对象上直接挂 url
+      out.push(pickImgUrl(p));
+    }
+    return uniqUrls(out);
+  }
+
+  function audioBlock(c) {
+    return get(c, 'audioInfo') || get(c, 'audio_info') || null;
+  }
+
+  function commentAudios(c) {
+    var a = audioBlock(c);
+    if (!isObj(a)) return [];
+    var out = [];
+    var play = get(a, 'playInfo') || get(a, 'play_info');
+    if (Array.isArray(play)) {
+      for (var i = 0; i < play.length; i++) {
+        if (isObj(play[i])) out.push(str(get(play[i], 'url')));
+      }
+    } else if (isObj(play)) {
+      out.push(str(get(play, 'url')));
+    }
+    // 兜底：audioInfo 上直接挂 url
+    out.push(str(get(a, 'url')));
+    return uniqUrls(out);
+  }
+
+  function isCommentish(o) {
+    return isObj(o) && (!!get(o, 'pictures') || !!audioBlock(o));
+  }
+
+  /**
+   * 从任意根节点（API 响应或 __INITIAL_STATE__）里收集评论媒体。
+   * 先走已知路径 data.comments / comments，命中就不做全树扫描。
+   */
+  function collectCommentMedia(root) {
+    if (!isObj(root) && !Array.isArray(root)) return [];
+
+    var lists = [];
+    function addList(v) { if (Array.isArray(v) && v.length) lists.push(v); }
+
+    var d = get(root, 'data');
+    if (isObj(d)) {
+      addList(get(d, 'comments'));
+      addList(get(d, 'comment_list'));
+    }
+    addList(get(root, 'comments'));
+    addList(get(root, 'comment_list'));
+
+    // 兜底：限定预算的深扫，找带 pictures / audioInfo 的对象
+    if (!lists.length) {
+      var stack = [root];
+      var visited = 0;
+      var started = Date.now();
+      while (stack.length) {
+        var n = stack.pop();
+        if (!isObj(n)) continue;
+        if (++visited > 20000) break;
+        if (Date.now() - started > 150) break;
+        if (isCommentish(n)) { lists.push([n]); continue; }
+        for (var k in n) {
+          if (!Object.prototype.hasOwnProperty.call(n, k)) continue;
+          var v = n[k];
+          if (isObj(v)) stack.push(v);
+        }
+      }
+    }
+
+    var found = [];
+    var seenId = Object.create(null);
+    for (var i = 0; i < lists.length && found.length < 200; i++) {
+      var arr = lists[i];
+      for (var j = 0; j < arr.length && found.length < 200; j++) {
+        var c = arr[j];
+        if (!isObj(c)) continue;
+        var imgs = commentImages(c);
+        var auds = commentAudios(c);
+        if (!imgs.length && !auds.length) continue;
+
+        var id = str(get(c, 'id')) || str(get(c, 'comment_id')) || ('c' + found.length);
+        if (seenId[id]) continue;
+        seenId[id] = 1;
+
+        var a = audioBlock(c);
+        var u = get(c, 'user_info') || get(c, 'user') || {};
+        found.push({
+          commentId: id,
+          author: str(get(u, 'nickname')) || str(get(u, 'nick_name')) || '',
+          images: imgs,
+          audios: auds,
+          // 语音转文字，可当文件名用；字段名同样双写兼容
+          asrText: isObj(a) ? (str(get(a, 'asrText')) || str(get(a, 'asr_text'))) : '',
+          duration: isObj(a) ? num(get(a, 'duration')) : 0
+        });
+      }
+    }
+    return found;
+  }
+
+  function emitCommentMedia(root) {
+    var list = collectCommentMedia(root);
+    if (!list.length) return false;
+    post('COMMENT_MEDIA', { items: list });
+    return true;
   }
 
   /* ================== 原生伪装 & 可降级钩子管理 ================== */
@@ -741,7 +897,10 @@
     var trimmed = text.slice(0, 64).trim();
     if (trimmed.charAt(0) !== '{' && trimmed.charAt(0) !== '[') return;
     try {
-      emitNotes(JSON.parse(text), 'api:' + url.split('?')[0].slice(-40));
+      var obj = JSON.parse(text);
+      emitNotes(obj, 'api:' + url.split('?')[0].slice(-40));
+      // 评论接口（/api/sns/web/v2/comment/page）的响应同样走这里
+      emitCommentMedia(obj);
     } catch (e) { /* 非 JSON，忽略 */ }
   }
 

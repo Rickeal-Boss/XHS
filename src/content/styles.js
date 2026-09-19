@@ -300,6 +300,29 @@ var XHS_DL_CSS = `
   background: rgba(0, 0, 0, .55);
 }
 .xhs-dl-tag.is-live { background: var(--xhs-red); }
+/* 评论语音：用偏冷的中性色，和「实况」的红色区分开 */
+.xhs-dl-tag.is-audio { background: #3f6ad8; }
+.xhs-dl-ph.is-audio {
+  background: var(--xhs-bg-sub);
+  color: #3f6ad8;
+}
+
+/* ------------------- 评论区（独立分区） ------------------- */
+.xhs-dl-sec {
+  margin-top: var(--xhs-sp-4);
+  padding-top: var(--xhs-sp-3);
+  border-top: 1px solid var(--xhs-line);
+}
+.xhs-dl-sec-hd { margin-bottom: var(--xhs-sp-2); }
+.xhs-dl-sec-all {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.xhs-dl-sec-all input { cursor: pointer; margin: 0; }
+.xhs-dl-sec-all span { font-size: 12px; color: var(--xhs-text-sub); }
 .xhs-dl-tick {
   position: absolute;
   right: 5px;
