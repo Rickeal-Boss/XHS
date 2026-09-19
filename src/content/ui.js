@@ -259,9 +259,15 @@ var XHS_DL_UI = (function () {
     return !!(els.panel && els.panel.classList.contains('is-open'));
   }
 
+  function isBusy() { return busy; }
+
   function open() {
     els.panel.classList.add('is-open');
     els.mask.classList.add('is-open');
+    // 每次打开都重置一次进度显示 —— 用户关闭面板后可能有上一次批次的
+    // DL_ALL_DONE 早已把进度条推到 "0 / 33" 之类的状态，再开时会被误读为
+    // "当前这批全部失败"。
+    hideProgress();
     if (handlers.onOpen) handlers.onOpen();
   }
 
@@ -467,6 +473,7 @@ var XHS_DL_UI = (function () {
     setMediaHints: setMediaHints,
     setPosition: function (p) { if (p) { pos = p; applyPosition(); } },
     setBusy: setBusy,
+    isBusy: isBusy,
     setProgress: setProgress,
     hideProgress: hideProgress,
     setBadge: setBadge,

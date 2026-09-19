@@ -255,6 +255,9 @@
     mediaHints = { videos: [] };
     XHS_DL_UI.clearNote();
     XHS_DL_UI.setBadge(0);
+    // 切笔记 / 重置时把上一次的进度/失败 toast 也清掉，避免"33 个失败"
+    // 之类旧状态误导用户。clearNote 是唯一入口，在此处清是最稳的。
+    XHS_DL_UI.hideProgress();
   }
 
   /* ========================= DOM 兜底提取 ========================= */
@@ -262,17 +265,38 @@
   /**
    * 三级降级的最后一级：页面状态和网络响应都拿不到时，从 DOM 直接抠。
    * 拿到的是压缩图 / blob 视频，信息不完整，仅保证「有总比没有好」。
+   *
+   * 关键陷阱：XHS 对未滚动到的图采用懒加载，img.src 是占位符（data:image/svg+xml
+   * 或极小的 base64），chrome.downloads.download 在 MV3 下会直接拒绝这两种协议，
+   * 「全部失败」即源于此。这里按以下顺序挑真实 URL：
+   *   1. currentSrc（浏览器已解析的真实地址，离屏图可能尚未加载）
+   *   2. data-original / data-src / data-url（XHS / React 常见懒加载属性）
+   *   3. src（最后兜底）
+   * 凡是 data: / blob: / chrome-extension: 一律丢弃，并把它们在可见图片里
+   * 占比告诉用户（让横幅给出可操作建议：滚动页面让图加载完，刷新本扩展）。
    */
+  function pickRealSrc(img) {
+    var attrs = ['currentSrc', 'data-original', 'data-src', 'data-url', 'src'];
+    for (var i = 0; i < attrs.length; i++) {
+      var v = img.getAttribute(attrs[i]) || img[attrs[i]] || '';
+      if (v && /^https?:/i.test(v)) return v;
+    }
+    return '';
+  }
+
   function domFallback() {
     var noteId = currentNoteIdFromUrl() || ('dom_' + Date.now());
     var images = [];
     var seen = Object.create(null);
+    var scannedNodes = 0, skippedPlaceholder = 0;
     var nodes = document.querySelectorAll(
       '#noteContainer img, .note-image-box img, .media-container img, .swiper-slide img'
     );
     for (var i = 0; i < nodes.length; i++) {
-      var src = nodes[i].currentSrc || nodes[i].src || '';
-      if (!src || src.indexOf('http') !== 0 || seen[src]) continue;
+      var node = nodes[i];
+      scannedNodes++;
+      var src = pickRealSrc(node);
+      if (!src || seen[src]) continue;
       if (/(avatar|icon|logo|sprite)/i.test(src)) continue;
       seen[src] = 1;
       images.push({
@@ -282,10 +306,12 @@
         urlJpg: '',
         liveVideoUrl: '',
         isLive: false,
-        width: nodes[i].naturalWidth || 0,
-        height: nodes[i].naturalHeight || 0
+        width: node.naturalWidth || 0,
+        height: node.naturalHeight || 0
       });
     }
+    // 占位符节点数 = 总节点数 - 入库数（含去重与白名单剔除）
+    skippedPlaceholder = scannedNodes - images.length;
 
     var videoEl = document.querySelector('#noteContainer video, .media-container video');
     var video = null;
@@ -322,14 +348,30 @@
 
   function tryDomFallback() {
     try {
-      var d = sanitizeNote(domFallback());
+      var raw = domFallback();
+      if (raw && raw.__scanStats) {
+        // 仅作诊断信息：跳过占位符的占比大时给用户更明确的指引
+        raw.__scanStats = null;       // 不污染 sanitizeNote 输入
+      }
+      var d = sanitizeNote(raw);
       if (d) {
         current = d;
         XHS_DL_UI.setNote(d);
-        XHS_DL_UI.setBanner('未能读取页面数据，已降级为页面元素提取：原图/原画质可能不可用。', 'warn');
+        // 区分两种降级：完全没拿到图 vs 拿到了部分图
+        var hint;
+        if (!d.images.length && !d.video) {
+          hint = '未能读取页面数据，DOM 兜底也找不到可下载资源。请刷新页面后重试。';
+        } else {
+          hint = '未能读取页面数据，已降级为 DOM 提取，原图/原画质不可用。如部分图下载失败，请滚动页面让图片加载完成后再点「重扫」。';
+        }
+        XHS_DL_UI.setBanner(hint, 'warn');
         updateBadge();
+      } else {
+        XHS_DL_UI.setBanner('未能读取页面数据，且 DOM 兜底提取的数据无法通过校验。', 'error');
       }
-    } catch (e) { /* 忽略 */ }
+    } catch (e) {
+      XHS_DL_UI.setBanner('兜底提取异常：' + (e && e.message ? e.message : e), 'error');
+    }
   }
 
   /* ========================= 页面世界消息 ========================= */
@@ -389,6 +431,13 @@
   /* ========================= 下载 ========================= */
 
   function doDownload(note, selected) {
+    // 防止同一秒内连点造成 background 收到多批 DOWNLOAD_BATCH；
+    // 之前没有这个守门，连点会触发多个 runBatch，结果互相干扰、计数翻倍
+    // （用户看到"33 个失败"可能就是早期连点留下的）。
+    if (XHS_DL_UI.isBusy()) {
+      XHS_DL_UI.toast('上一批下载还没结束，先等等', 'warn');
+      return;
+    }
     var tasks = XHS_DL_DOWNLOADER.buildTasks(note, selected, settings);
     if (!tasks.length) {
       XHS_DL_UI.toast('没有可下载的内容', 'error');
