@@ -157,22 +157,75 @@
     return m ? m[1] : '';
   }
 
+  /**
+   * 扩展上下文是否还活着。
+   *
+   * 在 edge://extensions 里点「重新加载」后，已经打开的页面上旧 content script
+   * 仍然在运行，但 chrome.runtime.id 会变成 undefined。此后任何
+   * `chrome-extension://<id>/...` 资源都会被浏览器重写成
+   * `chrome-extension://invalid/...` 并报：
+   *     Failed to load resource: net::ERR_FAILED
+   * 旧实现只做 try/catch 静默忽略，用户看到一堆 ERR_FAILED 却不知道要刷新页面。
+   */
+  var staleNotified = false;
+
+  function ctxAlive() {
+    try {
+      return !!(chrome && chrome.runtime && chrome.runtime.id);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function notifyStale() {
+    if (staleNotified) return;
+    staleNotified = true;
+    XHS_DL_UI.setBanner('扩展已重新加载，但本页还是旧版脚本。请刷新本页面（F5）后再使用。', 'error');
+    XHS_DL_UI.setBusy(false);
+  }
+
   function send(msg) {
+    if (!ctxAlive()) { notifyStale(); return; }
     try {
       chrome.runtime.sendMessage(msg, function () { void chrome.runtime.lastError; });
-    } catch (e) { /* 扩展被重载时可能抛错，忽略 */ }
+    } catch (e) {
+      notifyStale();
+    }
+  }
+
+  /** 定时探测：扩展被重载时用户不一定会触发 send()，靠轮询兜住 */
+  function startCtxWatch() {
+    setInterval(function () {
+      if (!ctxAlive()) notifyStale();
+    }, 3000);
   }
 
   /* ========================= 设置 ========================= */
 
   function loadSettings() {
     return new Promise(function (resolve) {
-      chrome.storage.local.get('xhs_settings', function (r) {
-        settings = Object.assign({}, DEFAULT_SETTINGS, (r && r.xhs_settings) || {});
+      // 扩展被重载后 chrome.storage 会抛错；这里必须 resolve 掉，
+      // 否则 boot() 里 .then(...) 永远不执行，onChanged 监听也注册不上
+      if (!ctxAlive()) {
+        settings = Object.assign({}, DEFAULT_SETTINGS);
         XHS_DL_UI.setSettings(settings);
-        applyHookSetting();
+        notifyStale();
         resolve(settings);
-      });
+        return;
+      }
+      try {
+        chrome.storage.local.get('xhs_settings', function (r) {
+          settings = Object.assign({}, DEFAULT_SETTINGS, (r && r.xhs_settings) || {});
+          XHS_DL_UI.setSettings(settings);
+          applyHookSetting();
+          resolve(settings);
+        });
+      } catch (e) {
+        settings = Object.assign({}, DEFAULT_SETTINGS);
+        XHS_DL_UI.setSettings(settings);
+        notifyStale();
+        resolve(settings);
+      }
     });
   }
 
@@ -630,9 +683,11 @@
       }
     });
 
-    chrome.storage.local.get('xhs_ball_pos', function (r) {
-      if (r && r.xhs_ball_pos) XHS_DL_UI.setPosition(r.xhs_ball_pos);
-    });
+    try {
+      chrome.storage.local.get('xhs_ball_pos', function (r) {
+        if (r && r.xhs_ball_pos) XHS_DL_UI.setPosition(r.xhs_ball_pos);
+      });
+    } catch (e) { notifyStale(); }
 
     loadSettings().then(function () {
       // 设置变化时热更新（用户在设置页改完立刻生效，无需刷新页面）
@@ -645,6 +700,9 @@
     });
 
     chrome.runtime.onMessage.addListener(onBackgroundMessage);
+
+    // 定时探测扩展上下文是否已被重载顶掉（用户不一定会触发 send()）
+    startCtxWatch();
 
     // 首屏稍等再兜底，给页面状态注入留出时间
     setTimeout(function () {
