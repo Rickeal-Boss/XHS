@@ -306,6 +306,21 @@ var XHS_DL_CSS = `
   background: var(--xhs-bg-sub);
   color: #3f6ad8;
 }
+/* 视频封面占位：XHS 自定义播放器常常不给 <video> 设 poster，
+   这时直接告诉用户「视频封面（缩略图未获取到）」比空盒友好。 */
+.xhs-dl-ph.is-video {
+  flex-direction: column;
+  gap: 6px;
+  background: var(--xhs-bg-sub);
+  color: var(--xhs-text-sub);
+  font-size: 13px;
+  font-weight: 500;
+}
+.xhs-dl-ph.is-video span {
+  font-size: 11px;
+  color: var(--xhs-text-mute);
+  font-weight: 400;
+}
 
 /* ------------------- 评论区（独立分区） ------------------- */
 .xhs-dl-sec {

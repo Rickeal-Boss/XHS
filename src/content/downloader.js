@@ -97,11 +97,13 @@ var XHS_DL_DOWNLOADER = (function () {
     return out.replace(/\s{2,}/g, ' ').trim();
   }
 
-  /** 从 URL 猜扩展名（兜底用） */
+  /** 从 URL 猜扩展名（兜底用）
+   * 注意：小红书把评论区语音标记成 .m4a URL，扩展名保留；不强行按"容器是 MP4"覆盖，
+   * 因为本地多数播放器（potplayer/vlc/qq影音等）都按扩展名 + 内部嗅探来识别。 */
   function guessExt(url, fallback) {
     try {
       var path = String(url).split('?')[0].toLowerCase();
-      var m = path.match(/\.(mp4|mov|webm|m4v|jpg|jpeg|png|webp|heic|gif|avif)$/);
+      var m = path.match(/\.(mp4|mov|webm|m4v|m4a|aac|jpg|jpeg|png|webp|heic|gif|avif|opus|ogg|wav|flac)$/);
       if (m) return '.' + m[1];
     } catch (e) { /* 忽略 */ }
     return fallback || '';

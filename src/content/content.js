@@ -738,6 +738,17 @@
           if (!current) tryDomFallback();
         }, 900);
       },
+      /**
+       * 刷新按钮：保留已有勾选与评论区选择，只请求 interceptor 再扫一次
+       * __INITIAL_STATE__。不调用 clearNote —— 重要：
+       *   - 评论区是懒加载，XHR hook 会自动接住新的 comment/page 响应，
+       *     这里的 rescan 是为了应对 INITIAL_STATE 在 SPA 内被替换等异常情况；
+       *   - 用户的勾选状态按 note.video / note.images 的索引保留。
+       */
+      onRefresh: function () {
+        requestRescan();
+        XHS_DL_UI.toast('已请求刷新', 'success');
+      },
       onOptions: function () {
         try { chrome.runtime.openOptionsPage(); } catch (e) { /* 忽略 */ }
       },

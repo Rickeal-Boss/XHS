@@ -11,7 +11,9 @@ var XHS_DL_UI = (function () {
     gear: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
     check: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="m4 12 5 5L20 6"/></svg>',
     empty: '<svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-4.5-4.5L7 20"/></svg>',
-    audio: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>'
+    audio: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>',
+    video: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="14" height="14" rx="2"/><path d="m22 8-6 4 6 4z"/></svg>',
+    refresh: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>'
   };
 
   var shadow = null;
@@ -183,6 +185,7 @@ var XHS_DL_UI = (function () {
       '  <div class="xhs-dl-btn-row">',
       '    <button class="xhs-dl-btn is-ghost" data-act="copy-links">复制全部直链</button>',
       '    <button class="xhs-dl-btn is-ghost" data-act="export-json">导出元数据</button>',
+      '    <button class="xhs-dl-btn is-ghost" data-act="refresh" title="重新扫描页面（评论区是懒加载，滚到评论区后点这个）"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>刷新</button>',
       '  </div>',
       '  <div class="xhs-dl-progress"><div class="xhs-dl-bar"><i></i></div>',
       '    <div class="xhs-dl-progress-text"><span></span><span></span></div>',
@@ -243,6 +246,7 @@ var XHS_DL_UI = (function () {
     else if (act === 'rescan') { if (handlers.onRescan) handlers.onRescan(); }
     else if (act === 'copy-links') { if (handlers.onCopyLinks) handlers.onCopyLinks(note, selected.slice()); }
     else if (act === 'export-json') { if (handlers.onExportJson) handlers.onExportJson(note); }
+    else if (act === 'refresh') { if (handlers.onRefresh) handlers.onRefresh(); }
     else if (act === 'cancel') { if (handlers.onCancel) handlers.onCancel(); }
     // act === 'all' 交给 change 事件处理
   }
@@ -371,7 +375,14 @@ var XHS_DL_UI = (function () {
 
   function setNote(n) {
     note = n;
-    selected = allIndexes();
+    // 保留勾选：只保留在新笔记里依然有效的 index —— 这样从 setNote 重扫时
+    // 不会把用户之前勾选的状态清掉。新建/首次进入时 selected = []，
+    // 下面的 if 会把整个索引加入。
+    var all = allIndexes();
+    var keep = {};
+    selected.forEach(function (i) { if (all.indexOf(i) !== -1) keep[i] = 1; });
+    var keptKeys = Object.keys(keep).map(Number);
+    selected = keptKeys.length ? keptKeys : all;
     render();
   }
 
@@ -444,7 +455,7 @@ var XHS_DL_UI = (function () {
         '<span class="xhs-dl-tick">' + ICON.check + '</span>' +
         (note.video.cover
           ? '<img src="' + esc(note.video.cover) + '" referrerpolicy="no-referrer" loading="lazy" alt="">'
-          : '<div class="xhs-dl-ph">视频</div>') +
+          : '<div class="xhs-dl-ph is-video">视频封面<br><span>缩略图未获取到</span></div>') +
         '</div>'
       );
     }
