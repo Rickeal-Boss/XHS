@@ -688,6 +688,33 @@
     return out;
   }
 
+  /**
+   * 评论区媒体 CDN 路径识别。
+   *
+   *   图片 sns-webpic-*.xhscdn.com/YYYYMMDDHHMM/<uuid>/comment/<fileKey>!...
+   *   音频 sns-video-v2.xhscdn.com/.../<file>.m4a?...（路径无 /comment/ 段，
+   *                                    来源靠 audioInfo 字段本身保证）
+   *   头像 sns-avatar-*.xhscdn.com/...  ← 一票否决
+   *   H5  ci.xiaohongshu.com/...         ← 保留
+   *
+   * 因此严格过滤只对 sns-webpic 应用；sns-video 上的音频没路径信号，
+   * 信任上游 audioInfo.playInfo.url 即足够。
+   */
+  function looksLikeCommentMedia(url) {
+    if (!url) return false;
+    var p = url.split('?')[0].toLowerCase();
+    // 头像 CDN：绝不混进评论
+    if (/sns-avatar-/.test(p)) return false;
+    // 图片 CDN：必须有 /comment/ 段
+    if (/sns-webpic-[a-z0-9.-]*xhscdn\.(com|net)/.test(p)) {
+      return p.indexOf('/comment/') !== -1;
+    }
+    // 视频/音频 CDN：路径无 /comment/ 信号，靠上游字段保证
+    if (/sns-video-[a-z0-9.-]*xhscdn\.(com|net)/.test(p)) return true;
+    // H5 / 其他：保留原样
+    return true;
+  }
+
   function pickImgUrl(o) {
     if (!isObj(o)) return '';
     return str(get(o, 'url')) || str(get(o, 'url_default')) || str(get(o, 'url_pre')) || '';
@@ -708,7 +735,8 @@
       // 兜底：图片对象上直接挂 url
       out.push(pickImgUrl(p));
     }
-    return uniqUrls(out);
+    // 路径过滤：丢掉被 API 误带上的主图 / 表情包 / 资源树里的"目录条目"
+    return uniqUrls(out.filter(looksLikeCommentMedia));
   }
 
   function audioBlock(c) {

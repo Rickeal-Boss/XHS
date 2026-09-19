@@ -51,8 +51,13 @@ STATE = {
                 "user_info": {"nickname": "评论者甲", "userId": "cu1"},
                 "pictures": [
                     {"info_list": [
-                        {"url": "http://sns-webpic-qc.xhscdn.com/2026/bb/1040g2sgcmt1!nc_n_webp_mw_1"},
-                        {"url": "http://sns-webpic-qc.xhscdn.com/2026/bb/1040g2sgcmt1_pre!nd_prv_wlteh_webp_3"},
+                        # 正常的评论图：路径含 /comment/（与真实 XHS CDN 一致）
+                        {"url": "http://sns-webpic-qc.xhscdn.com/2026/bb/1040g2sgcmt1/comment/1040g2sgcmt1!nc_n_webp_mw_1"},
+                        {"url": "http://sns-webpic-qc.xhscdn.com/2026/bb/1040g2sgcmt1/comment/1040g2sgcmt1_pre!nd_prv_wlteh_webp_3"},
+                        # 噪声：sns-webpic 但路径无 /comment/，应该是被 API 误带上的主图
+                        {"url": "http://sns-webpic-qc.xhscdn.com/2026/bb/NOISE/1040g2sgNOISE!nc_n_webp_mw_1"},
+                        # 噪声：sns-avatar 头像，绝不该出现
+                        {"url": "https://sns-avatar-qc.xhscdn.com/avatar/evil.png"},
                     ]}
                 ],
             },
@@ -157,8 +162,10 @@ print("-" * 64)
 print(out.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"))
 print("-" * 64)
 ok = ("是否收到 COMMENT_MEDIA: YES" in out
-      and "图片总数=2" in out
+      and "图片总数=2" in out                # 2 真实 + 2 噪声被滤掉
       and "语音总数=2" in out
-      and "所有 URL 均为 http(s) = true" in out)
-print("结论: " + ("✅ 评论区图片与语音均正确提取" if ok else "❌ 提取不完整"))
+      and "所有 URL 均为 http(s) = true" in out
+      and "NOISE" not in out                  # 主图噪声被过滤
+      and "evil" not in out)                  # 头像被过滤
+print("结论: " + ("✅ 评论区图片与语音均正确提取，且 CDN 路径过滤掉主图/头像噪声" if ok else "❌ 提取/过滤有误"))
 raise SystemExit(0 if ok else 1)
