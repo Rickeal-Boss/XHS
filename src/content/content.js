@@ -278,6 +278,7 @@
       // 同一篇笔记的更新：保留用户已勾选状态，只刷新数据
       current = mergeNote(current, data);
       XHS_DL_UI.setNote(current);
+      enrichVideoCover(current);
       return;
     }
 
@@ -285,7 +286,28 @@
     hookDisabledNotified = false;
     XHS_DL_UI.setNote(current);
     XHS_DL_UI.setBanner('', null);
+    enrichVideoCover(current);
     updateBadge();
+  }
+
+  /**
+   * 视频封面兜底。
+   * API 提取路径下 figure 格式笔记的 note.video.cover 经常为空字符串，
+   * 但页面 <video> 元素的 poster 属性一定有。读出来补上，UI 才能显示
+   * 缩略图而不是空粉色框。多重试几次覆盖 poster 还没设上的竞态窗口。
+   */
+  function enrichVideoCover(note, attempt) {
+    if (!note || !note.video || note.video.cover) return;
+    attempt = attempt || 0;
+    try {
+      var v = document.querySelector('#noteContainer video, .media-container video, video');
+      if (v && v.poster) {
+        note.video.cover = v.poster;
+        try { XHS_DL_UI.setNote(note); } catch (e) { /* 忽略 */ }
+        return;
+      }
+    } catch (e) { /* 忽略 */ }
+    if (attempt < 4) setTimeout(function () { enrichVideoCover(note, attempt + 1); }, 500);
   }
 
   /** 合并两份同一笔记的数据，字段更完整者胜出 */
@@ -409,6 +431,7 @@
       var d = sanitizeNote(raw);
       if (d) {
         current = d;
+        enrichVideoCover(d);
         XHS_DL_UI.setNote(d);
         // 区分两种降级：完全没拿到图 vs 拿到了部分图
         var hint;
