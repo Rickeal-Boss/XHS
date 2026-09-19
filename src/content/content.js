@@ -471,6 +471,10 @@
             console.warn('[XHS-DL 诊断] 未能从页面读到笔记数据，诊断信息：',
               JSON.stringify(d.payload && d.payload.diag, null, 2));
           } catch (e) { /* 忽略 */ }
+        } else {
+          try {
+            console.log('[XHS-DL] 重扫成功，已读到笔记数据');
+          } catch (e) { /* 忽略 */ }
         }
         if (!current) {
           tryDomFallback();
@@ -649,6 +653,11 @@
   /* ========================= 启动 ========================= */
 
   function boot() {
+    // 启动标记：现场排查时用户首先要确认"扩展到底有没有在跑"。
+    // 看不到这一行 = 页面上是被重载顶掉的旧脚本，应刷新页面。
+    try {
+      console.log('[XHS-DL] 内容脚本已启动，扩展上下文正常（找不到这行说明页面上是旧脚本，请刷新页面）');
+    } catch (e) { /* 忽略 */ }
     XHS_DL_UI.mount({
       onOpen: function () {
         requestRescan();

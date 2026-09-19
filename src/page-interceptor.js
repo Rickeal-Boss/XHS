@@ -559,6 +559,14 @@
   /** 最近一次扫描的统计，供诊断使用 */
   var lastScan = { visited: 0, found: 0, source: '', directHit: false, ms: 0 };
 
+  /**
+   * @returns {boolean} 是否真的投递了一条 NOTE。
+   *
+   * 之前这个函数没有返回值，调用方 scanInitialState 只能凭
+   * "window.__INITIAL_STATE__ 存在" 就返回 true —— 于是状态存在但里面
+   * 没有笔记时也被当成成功：内联 script 兜底不会跑、诊断快照不会输出，
+   * 现场问题因此完全无从下手。
+   */
   function emitNotes(rawRoot, source) {
     // 先按已知路径直取，命中即返回，避免在大号状态上做全树扫描
     var direct = pickFromKnownPaths(rawRoot);
@@ -567,7 +575,7 @@
       if (fast) {
         lastScan = { visited: 1, found: 1, source: source, directHit: true, ms: 0 };
         post('NOTE', fast);
-        return;
+        return true;
       }
     }
 
@@ -577,7 +585,7 @@
       collectNotes(rawRoot, bag, stats);
     } catch (e) {
       lastScan = { visited: stats.visited, found: 0, source: source, directHit: false, ms: -1 };
-      return;
+      return false;
     }
     lastScan = {
       visited: stats.visited,
@@ -587,7 +595,7 @@
       ms: Date.now() - stats.startedAt
     };
     var notes = Object.keys(bag).map(function (k) { return bag[k]; });
-    if (!notes.length) return;
+    if (!notes.length) return false;
 
     // 优先投递当前 URL 对应的笔记
     var want = currentNoteId();
@@ -604,22 +612,30 @@
       }, notes[0]);
     }
     post('NOTE', picked);
+    return true;
   }
 
   /* ======================= __INITIAL_STATE__ ======================= */
 
+  /**
+   * @returns {boolean} 是否真的拿到并投递了笔记。
+   * 以前只看 "__INITIAL_STATE__ 存在"，状态存在但里面没有笔记时
+   * 也返回 true，导致内联 script 兜底和诊断快照都被跳过。
+   */
   function scanInitialState(reason) {
     try {
       var state = window.__INITIAL_STATE__;
       if (!state) return false;
-      emitNotes(state, 'initial-state');
-      return true;
+      return emitNotes(state, 'initial-state');
     } catch (e) {
       return false;
     }
   }
 
-  /** 兜底：从 <script> 内联文本里正则抠出 __INITIAL_STATE__ */
+  /**
+   * 兜底：从 <script> 内联文本里正则抠出 __INITIAL_STATE__。
+   * @returns {boolean} 是否真的投递了笔记
+   */
   function scanInlineScript() {
     try {
       var scripts = document.querySelectorAll('script');
@@ -632,10 +648,11 @@
         // 内联 JSON 里可能含 undefined，替换后才能 parse
         var json = m[1].replace(/:\s*undefined\b/g, ':null');
         try {
-          emitNotes(JSON.parse(json), 'inline-script');
+          if (emitNotes(JSON.parse(json), 'inline-script')) return true;
         } catch (e) { /* 单个 script 解析失败不影响其他 */ }
       }
     } catch (e) { /* 忽略 */ }
+    return false;
   }
 
   /* ================== 原生伪装 & 可降级钩子管理 ================== */
@@ -869,7 +886,7 @@
 
   function respondRescan() {
     var ok = scanInitialState('rescan');
-    if (!ok) scanInlineScript();
+    if (!ok) ok = scanInlineScript();
     post('MEDIA_HINTS', { videos: mediaSink.videos.slice() });
     post('RESCAN_DONE', {
       noteId: currentNoteId(),
