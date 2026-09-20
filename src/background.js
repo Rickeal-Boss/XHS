@@ -551,6 +551,24 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       return false;
     }
 
+    /**
+     * 打开设置页。必须由 **Service Worker** 来执行：
+     *  - 内容脚本里调 openOptionsPage() 在 Edge MV3 下经常"什么都不发生"；
+     *  - 内容脚本里 window.open(getURL(...)) 会被浏览器拦掉
+     *    （ERR_BLOCKED_BY_CLIENT —— 内容脚本属页面上下文，
+     *      浏览器禁止从页面跳转到扩展内部页面）。
+     * 后台上下文两者都不会被拦，因此统一走这里转发。
+     */
+    case 'OPEN_OPTIONS': {
+      var opened = false;
+      try {
+        chrome.runtime.openOptionsPage();
+        opened = true;
+      } catch (e) { /* 忽略，走下面的兜底 */ }
+      sendResponse({ ok: opened });
+      return false;
+    }
+
     case 'PING':
       sendResponse({ ok: true, version: chrome.runtime.getManifest().version });
       return false;

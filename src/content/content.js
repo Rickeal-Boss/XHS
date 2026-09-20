@@ -964,14 +964,19 @@
         // 这里不需要再触发一次；浏览器侧的真实 SPA 链路会自动走「多次重试 → 软刷新」兜底。
       },
       onOptions: function () {
-        // ⚠️ chrome.runtime.openOptionsPage() 从内容脚本触发在 Edge MV3 下
-        // 经常"什么都不发生"（不报错也不开新页）。最稳的做法是直接拿扩展
-        // 自己的 URL 调 window.open，与 popup 那次 fix 同思路。
-        try {
-          window.open(chrome.runtime.getURL('src/options/options.html'), '_blank');
-        } catch (e) {
-          try { chrome.runtime.openOptionsPage(); } catch (e2) { /* ignore */ }
-        }
+        // ⚠️ 这个动作必须由后台 Service Worker 执行，内容脚本自己干不了：
+        //  1) openOptionsPage() 在内容脚本里经常"什么都不发生"；
+        //  2) window.open(getURL(...)) 会被浏览器拦掉
+        //     （ERR_BLOCKED_BY_CLIENT：内容脚本属页面上下文，
+        //      浏览器禁止从页面跳转到扩展内部页面）。
+        // 因此转发给后台，由后台用完整权限打开。
+        send({ type: 'OPEN_OPTIONS' }, function (res) {
+          if (res && res.ok) return;
+          // 兜底：至少告诉用户怎么手动打开
+          var url = '';
+          try { url = chrome.runtime.getURL('src/options/options.html'); } catch (e) { /* ignore */ }
+          XHS_DL_UI.toast(url ? '无法自动打开设置页，请手动访问：' + url : '无法自动打开设置页', 'error');
+        });
       },
       onDownload: doDownload,
       onCopyLinks: function (note, selected) {

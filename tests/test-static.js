@@ -734,7 +734,8 @@ var outgoing = [];
 outgoing.push('SET_HOOK');   // applyHookSetting
 outgoing.push('REQUEST_RESCAN'); // requestRescan
 // 以下类型走 chrome.runtime 通道发给后台，不属于页面世界契约
-var runtimeOnly = ['DOWNLOAD_BATCH', 'CANCEL_BATCH'];
+// OPEN_OPTIONS：面板齿轮转发给后台代开设置页（内容脚本自己开会被浏览器拦截）
+var runtimeOnly = ['DOWNLOAD_BATCH', 'CANCEL_BATCH', 'OPEN_OPTIONS'];
 outgoing = outgoing.filter(function (t) { return runtimeOnly.indexOf(t) === -1; });
 var handled = [];
 (interceptorSrc.match(/d\.type === '([A-Z_]+)'/g) || []).forEach(function (s) {
@@ -838,10 +839,17 @@ if (oi !== -1) {
  * 下经常"什么都不发生"（不报错也不开新页）。面板齿轮的 onOptions handler
  * 必须改走 window.open(chrome.runtime.getURL(...))，否则用户的齿轮不跳转。
  */
-H.suite('面板齿轮 onOptions 用 getURL + window.open');
+H.suite('面板齿轮 onOptions 必须转发给后台打开');
 var contentSrc2 = read('src/content/content.js');
-ok('OPT-URL-1', 'content.js 用 chrome.runtime.getURL + window.open 打开设置页',
-  /window\.open\(\s*chrome\.runtime\.getURL\(\s*['"]src\/options\/options\.html['"]/.test(contentSrc2));
+var bgSrc2 = read('src/background.js');
+ok('OPT-URL-1', 'content.js 发送 OPEN_OPTIONS 消息（由后台代开）',
+  contentSrc2.indexOf("type: 'OPEN_OPTIONS'") !== -1);
+ok('OPT-URL-2', 'background.js 处理 OPEN_OPTIONS',
+  bgSrc2.indexOf("case 'OPEN_OPTIONS'") !== -1);
+// 反向守门：内容脚本里不能再出现被浏览器拦截的写法
+ok('OPT-URL-3', 'content.js 不得用 window.open 打开扩展页面（会被 ERR_BLOCKED_BY_CLIENT 拦截）',
+  !/window\.open\(\s*chrome\.runtime\.getURL/.test(contentSrc2),
+  /window\.open\(\s*chrome\.runtime\.getURL/.test(contentSrc2) ? '发现被拦截写法' : '');
 
 var S = H.summary('test-static.js');
 process.exit(S.fail ? 1 : 0);
