@@ -25,7 +25,10 @@
     dirByAuthor: false,
     dirByTitle: false,
     baseDir: '小红书下载',
-    hookEnabled: true
+    hookEnabled: true,
+    // SPA 切换后自动重新取源（同源 fetch 重取 SSR HTML）。默认开启：
+    // 用户的核心痛点就是"必须整页刷新才能取到源"，默认关等于把修复藏起来。
+    spaSource: true
   };
 
   var settings = Object.assign({}, DEFAULT_SETTINGS);
@@ -297,6 +300,13 @@
       type: 'SET_HOOK',
       payload: { enabled: settings.hookEnabled !== false }
     }, targetOrigin());
+    // 软刷新开关单独下发：它是"取不到源时才发的额外请求"，用户应能自行关闭，
+    // 而不必为了关它把整个网络监听一起关掉。
+    window.postMessage({
+      __channel: CHANNEL,
+      type: 'SET_SPA_SOURCE',
+      payload: { enabled: settings.spaSource !== false }
+    }, targetOrigin());
   }
 
   /* ========================= 笔记状态 ========================= */
@@ -312,6 +322,22 @@
    */
   var lastNavSeq = 0;
   var lastSoftRefresh = 'idle';
+
+  /**
+   * 把取源方式折算成徽标等级。
+   * 只有 soft-refresh 单独占一档（"自动重取"），其余非 dom 来源都算正常取到源。
+   * 徽标的意义是让用户知道"为什么画质会差"，所以它必须随每次数据更新而更新，
+   * 否则又会变成一个撒谎的信号。
+   */
+  function badgeLevel(source) {
+    if (source === 'dom') return 'dom';
+    if (source === 'soft-refresh') return 'soft';
+    return 'source';
+  }
+
+  function updateSourceBadge(source) {
+    if (XHS_DL_UI.setSourceBadge) XHS_DL_UI.setSourceBadge(badgeLevel(source));
+  }
 
   function acceptNote(raw) {
     var data = sanitizeNote(raw);
@@ -334,6 +360,7 @@
       console.log('[XHS-DL 诊断] NOTE accepted  noteId=' + data.noteId +
         ' 来源=' + (raw && raw.source));
     } catch (e) { /* 忽略 */ }
+    updateSourceBadge(data.source);
 
     if (current && current.noteId === data.noteId) {
       // 同一篇笔记的更新：保留用户已勾选状态，只刷新数据
@@ -390,6 +417,9 @@
     current = null;
     commentMedia = [];
     mediaHints = { videos: [] };
+    // 切笔记后来源未知，徽标必须跟着清掉，否则会把上一篇的"源"标记
+    // 留到下一篇上 —— 那就是假信号了。
+    if (XHS_DL_UI.setSourceBadge) XHS_DL_UI.setSourceBadge('');
     XHS_DL_UI.clearNote();
     XHS_DL_UI.setCommentMedia([]);
     XHS_DL_UI.setBadge(0);
@@ -503,6 +533,7 @@
         current = d;
         enrichVideoCover(d);
         XHS_DL_UI.setNote(d);
+        updateSourceBadge('dom');
         // 区分两种降级：完全没拿到图 vs 拿到了部分图
         var hint;
         if (!d.images.length && !d.video) {

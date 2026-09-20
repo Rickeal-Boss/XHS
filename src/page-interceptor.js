@@ -1196,6 +1196,8 @@
   /** 最近一次软刷新的结果：idle | ok | failed | skipped */
   var softRefreshState = 'idle';
   var softRefreshLock = 0;
+  /** 软刷新总开关，由隔离世界按用户设置下发（默认开启） */
+  var spaSourceEnabled = true;
 
   /**
    * 页面内"软刷新"：同源 fetch 重取当前 URL 的 SSR HTML，再抠出 __INITIAL_STATE__。
@@ -1232,7 +1234,8 @@
 
     // 前两级都拿不到当前笔记时才上软刷新。节流 3s：用户连点刷新不应反复
     // 拉整页 HTML（体积数百 KB，且可能计入站点统计）。
-    if (!ok && currentNoteId() && Date.now() - softRefreshLock > 3000) {
+    // 开关关闭时直接跳过：软刷新是一次额外的文档请求，用户有权关掉它。
+    if (!ok && spaSourceEnabled && currentNoteId() && Date.now() - softRefreshLock > 3000) {
       softRefreshLock = Date.now();
       softRefreshState = 'ok';   // 先置 ok，真正失败时再改回，避免竞态下误报 failed
       // 先告诉隔离世界"软刷新在飞"，它就不会急着降级到 DOM（否则软刷新
@@ -1285,6 +1288,8 @@
         else uninstallHooks('settings');
       } catch (e) { /* 忽略 */ }
       post('HOOK_STATE', { active: hooks.installed });
+    } else if (d.type === 'SET_SPA_SOURCE') {
+      spaSourceEnabled = !!(d.payload && d.payload.enabled);
     }
   });
 

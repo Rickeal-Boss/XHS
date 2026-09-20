@@ -590,7 +590,8 @@ chrome.runtime.onInstalled.addListener(function () {
           dirByAuthor: false,
           dirByTitle: false,
           baseDir: '小红书下载',
-          hookEnabled: true
+          hookEnabled: true,
+          spaSource: true
         }
       });
     }

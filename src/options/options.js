@@ -16,7 +16,11 @@
     dirByAuthor: false,
     dirByTitle: false,
     baseDir: '小红书下载',
-    hookEnabled: true
+    hookEnabled: true,
+    // SPA 切换后自动重新取源（同源 fetch 重取 SSR HTML）。
+    // 默认开启：用户的核心痛点就是"必须整页刷新才能取到源"，
+    // 关掉默认值等于把修复藏着不让人用；真出问题由用户自行关闭即可。
+    spaSource: true
   };
 
   /** 预览用的示例笔记，让用户直观看到命名效果 */
@@ -133,6 +137,7 @@
     els.dirByAuthor.checked = !!state.dirByAuthor;
     els.dirByTitle.checked = !!state.dirByTitle;
     els.hookEnabled.checked = state.hookEnabled !== false;
+    els.spaSource.checked = state.spaSource !== false;
 
     ['imageFormat', 'videoQuality', 'streamPreference', 'liveMode'].forEach(function (group) {
       var inputs = document.querySelectorAll('input[name="' + group + '"]');
@@ -222,6 +227,7 @@
       dirByAuthor: $('dirByAuthor'),
       dirByTitle: $('dirByTitle'),
       hookEnabled: $('hookEnabled'),
+      spaSource: $('spaSource'),
       chips: $('chips'),
       preview: $('preview'),
       btnReset: $('btnReset'),

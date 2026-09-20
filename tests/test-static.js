@@ -526,7 +526,7 @@ ok('ASM-8', 'UI host 已挂载到 documentElement',
 H.suite('内容脚本装配 — XHS_DL_UI 方法契约');
 var uiMethods = ['mount', 'open', 'close', 'toggle', 'isOpen', 'setNote', 'clearNote',
   'setSettings', 'setMediaHints', 'setPosition', 'setBusy', 'setProgress', 'hideProgress',
-  'setBadge', 'setBanner', 'toast'];
+  'setBadge', 'setBanner', 'toast', 'setSourceBadge'];
 uiMethods.forEach(function (m) {
   ok('UIAPI-' + m, 'XHS_DL_UI.' + m + ' 是函数',
     typeof L.sandbox.XHS_DL_UI[m] === 'function');
