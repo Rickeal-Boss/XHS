@@ -33,6 +33,10 @@
   var commentMedia = [];       // 评论区媒体（图片 / 语音音频）
   var mediaHints = { videos: [] };
   var hookDisabledNotified = false;
+  // 最近一次 RESCAN_DONE 带来的导航序号。页面世界每次 SPA 切换都会自增，
+  // 因此它能区分「这次重扫属于哪一次导航」，是排查"数据是上一篇的"的关键线索。
+  // 供 window.__XHS_DL_DIAG__() 读出，真机脚本靠它确认自己看的是最新一次结果。
+  var lastNavSeq = 0;
 
   /**
    * 入站数据白名单。
@@ -301,6 +305,13 @@
 
   /* ========================= 笔记状态 ========================= */
 
+  /**
+   * 最近一次路由切换序号与软刷新结果，来自 RESCAN_DONE.diag。
+   * 只用于诊断输出，不影响业务逻辑。
+   */
+  var lastNavSeq = 0;
+  var lastSoftRefresh = 'idle';
+
   function acceptNote(raw) {
     var data = sanitizeNote(raw);
     if (!data) return;
@@ -308,7 +319,20 @@
     // SPA 串台防护：URL 上能取到 noteId 且与数据不一致时，说明数据是上一篇的。
     // 首页 feed 会一次返回多条笔记，此时以 URL 为准，忽略非当前条目。
     var urlId = currentNoteIdFromUrl();
-    if (urlId && data.noteId !== urlId) return;
+    if (urlId && data.noteId !== urlId) {
+      // 拒绝也必须留痕 —— 这是"静默失败链"的最后一环。
+      // 上游 emitNotes 只要投递过一条 NOTE 就返回 true，于是控制台会同时出现
+      // 「重扫成功」和「已降级为 DOM 提取」，现场排查完全无从下手。
+      try {
+        console.warn('[XHS-DL 诊断] NOTE rejected  收到=' + data.noteId +
+          ' 当前URL=' + urlId + ' 来源=' + (raw && raw.source));
+      } catch (e) { /* 忽略 */ }
+      return;
+    }
+    try {
+      console.log('[XHS-DL 诊断] NOTE accepted  noteId=' + data.noteId +
+        ' 来源=' + (raw && raw.source));
+    } catch (e) { /* 忽略 */ }
 
     if (current && current.noteId === data.noteId) {
       // 同一篇笔记的更新：保留用户已勾选状态，只刷新数据
@@ -478,6 +502,9 @@
         } else {
           hint = '未能读取页面数据，已降级为 DOM 提取，原图/原画质不可用。如部分图下载失败，请滚动页面让图片加载完成后再点「重扫」。';
         }
+        // 软刷新（同源 fetch 重取 SSR HTML）也失败过，才告诉用户"已经努力过了"，
+        // 避免用户误以为扩展根本没尝试自动恢复。
+        if (lastSoftRefresh === 'failed') hint += '（已尝试自动重新取源但失败）';
         XHS_DL_UI.setBanner(hint, 'warn');
         updateBadge();
       } else {
@@ -542,17 +569,33 @@
         }
         break;
 
-      case 'RESCAN_DONE':
+      case 'RESCAN_DONE': {
+        var rp = d.payload || {};
+        var rdiag = rp.diag || {};
+        // 判定必须看 accepted（投递的是不是当前这条笔记），不能只看 ok。
+        // ok=true 只代表上游"投递过"，下游可能因串台防护而拒绝 ——
+        // 只看 ok 会让「重扫成功」和「已降级为 DOM」同时出现，信号本身在撒谎。
+        // accepted 缺失时（旧版 interceptor）回退到 ok，保证不崩。
+        var accepted = (typeof rp.accepted === 'boolean') ? rp.accepted : !!rp.ok;
+        if (typeof rdiag.navSeq === 'number') lastNavSeq = rdiag.navSeq;
+        if (rdiag.softRefresh) lastSoftRefresh = rdiag.softRefresh;
+
+        if (rp.pendingSoftRefresh) {
+          // 页面侧正在同源 fetch 重取 SSR HTML，稍后会再发一次 RESCAN_DONE。
+          // 此时绝不能走 DOM 兜底，否则软刷新成功也会被降级结果覆盖。
+          try { console.log('[XHS-DL 诊断] 软刷新进行中，等待下一次结果'); } catch (e) { /* 忽略 */ }
+          break;
+        }
+
         // 读不到数据时把诊断快照打到控制台：现场问题在沙箱里复现不了，
         // 让用户复制这一行比继续猜要快得多
-        if (!d.payload || !d.payload.ok) {
+        if (accepted && current) {
           try {
-            console.warn('[XHS-DL 诊断] 未能从页面读到笔记数据，诊断信息：',
-              JSON.stringify(d.payload && d.payload.diag, null, 2));
+            console.log('[XHS-DL] 已取到源数据（来源=' + current.source + '）');
           } catch (e) { /* 忽略 */ }
         } else {
           try {
-            console.log('[XHS-DL] 重扫成功，已读到笔记数据');
+            console.warn('[XHS-DL 诊断] 未取到源，诊断信息：', JSON.stringify(rdiag, null, 2));
           } catch (e) { /* 忽略 */ }
         }
         if (!current) {
@@ -560,10 +603,15 @@
           if (!current) XHS_DL_UI.toast('没有识别到笔记数据', 'error');
         }
         break;
+      }
 
       case 'ROUTE_CHANGE':
         clearNote();
         XHS_DL_UI.setBanner('', null);
+        // 切笔记后必须立刻再要一次数据。之前这里只 clearNote 就结束了：
+        // 面板清空后再没有任何扫描请求（1.5/4/9s 的定时扫描早已跑完），
+        // 于是 SPA 点开新笔记必定空面板，只能整页刷新 —— 这正是本次要修的主痛点。
+        setTimeout(requestRescan, 0);
         break;
     }
   });
@@ -820,6 +868,23 @@
     setTimeout(function () {
       if (!current) tryDomFallback();
     }, 3500);
+
+    // 暴露诊断快照：真机验证脚本直接读这个对象即可判定"取到源还是降级"，
+    // 不必再去匹配 console 文本（文本匹配在日志刷屏时极不可靠）。
+    try {
+      window.__XHS_DL_DIAG__ = function () {
+        return {
+          noteId: current && current.noteId,
+          source: current && current.source,
+          imageCount: current ? current.images.length : 0,
+          hasVideo: !!(current && current.video),
+          commentCount: commentMedia.length,
+          degraded: !!current && current.source === 'dom',
+          navSeq: lastNavSeq,
+          softRefresh: lastSoftRefresh
+        };
+      };
+    } catch (e) { /* 忽略 */ }
   }
 
   if (document.readyState === 'loading') {
