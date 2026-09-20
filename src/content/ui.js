@@ -180,6 +180,7 @@ var XHS_DL_UI = (function () {
       '    <button class="xhs-dl-iconbtn" data-act="close" title="关闭 (Esc)">' + ICON.close + '</button>',
       '  </div>',
       '  <div class="xhs-dl-meta"></div>',
+      '  <button class="xhs-dl-src" type="button" data-act="src-refresh" hidden disabled></button>',
       '</div>',
       '<div class="xhs-dl-toolbar">',
       '  <label class="xhs-dl-check"><input type="checkbox" data-act="all"> 全选</label>',
@@ -201,6 +202,7 @@ var XHS_DL_UI = (function () {
     ].join('');
 
     els.meta = els.panel.querySelector('.xhs-dl-meta');
+    els.srcBadge = els.panel.querySelector('button[data-act="src-refresh"]');
     els.body = els.panel.querySelector('.xhs-dl-body');
     els.count = els.panel.querySelector('.xhs-dl-count');
     els.checkAll = els.panel.querySelector('input[data-act="all"]');
@@ -253,7 +255,8 @@ var XHS_DL_UI = (function () {
     else if (act === 'rescan') { if (handlers.onRescan) handlers.onRescan(); }
     else if (act === 'copy-links') { if (handlers.onCopyLinks) handlers.onCopyLinks(note, selected.slice()); }
     else if (act === 'export-json') { if (handlers.onExportJson) handlers.onExportJson(note); }
-    else if (act === 'refresh') { if (handlers.onRefresh) handlers.onRefresh(); }
+    // 数据来源徽标（仅降级态可点）与底部「刷新」共用同一条重新取源链路
+    else if (act === 'refresh' || act === 'src-refresh') { if (handlers.onRefresh) handlers.onRefresh(); }
     else if (act === 'cancel') { if (handlers.onCancel) handlers.onCancel(); }
     // act === 'all' 交给 change 事件处理
   }
@@ -520,6 +523,35 @@ var XHS_DL_UI = (function () {
     els.body.parentNode.insertBefore(b, els.body);
   }
 
+  /* 数据来源徽标：常驻在面板头部，显式告诉用户当前媒体是「取自源」
+     还是「DOM 兜底降级」（降级只能拿到压缩图）。只有降级态可点击，
+     点一下即走与底部「刷新」完全相同的重新取源链路。 */
+  var SOURCE_BADGE = {
+    source: { text: '源 · 原画质', mod: 'is-source' },
+    soft: { text: '源 · 自动重取', mod: 'is-soft' },
+    dom: { text: '降级 · DOM 提取', mod: 'is-dom', retry: '重新取源' }
+  };
+
+  /** @param {'source'|'soft'|'dom'|''} level 未知值一律按隐藏处理 */
+  function setSourceBadge(level) {
+    var b = els.srcBadge;
+    if (!b) return;
+    var conf = SOURCE_BADGE[level];
+    if (!conf) {
+      b.hidden = true;
+      b.disabled = true;
+      b.innerHTML = '';
+      return;
+    }
+    b.hidden = false;
+    // 非降级态用 disabled 关掉点击：disabled 按钮不派发 click，
+    // 不必再在委托里判断状态。
+    b.disabled = !conf.retry;
+    b.className = 'xhs-dl-src ' + conf.mod;
+    b.innerHTML = '<span class="xhs-dl-src-txt">' + esc(conf.text) + '</span>' +
+      (conf.retry ? '<span class="xhs-dl-src-act">' + esc(conf.retry) + '</span>' : '');
+  }
+
   /* --------------------------- 下载 --------------------------- */
 
   function doDownload() {
@@ -588,6 +620,7 @@ var XHS_DL_UI = (function () {
     hideProgress: hideProgress,
     setBadge: setBadge,
     setBanner: setBanner,
+    setSourceBadge: setSourceBadge,
     toast: toast
   };
 })();

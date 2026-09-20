@@ -28,6 +28,8 @@ var XHS_DL_CSS = `
   --xhs-success: #1a9e5c;
   --xhs-warn: #d98b16;
   --xhs-error: #e5484d;
+  /* 中性蓝：评论语音标记与「数据来源徽标 — 自动重取」共用 */
+  --xhs-info: #3f6ad8;
 
   --xhs-r-sm: 6px;
   --xhs-r-md: 10px;
@@ -222,6 +224,45 @@ var XHS_DL_CSS = `
   min-width: 0;
 }
 
+/* 数据来源徽标：常驻头部，告诉用户当前媒体取自「源」还是「DOM 兜底降级」。
+   降级态可点击（点击重新取源），非降级态用 disabled 关掉交互。
+   字号写在子 span 上：.xhs-dl button 的 font-size: inherit 会盖掉
+   直接写在 button 上的 font-size。 */
+.xhs-dl-src {
+  margin-top: var(--xhs-sp-2);
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--xhs-text-sub);
+  text-align: left;
+}
+.xhs-dl-src::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--xhs-r-full);
+  background: currentColor;
+}
+.xhs-dl-src.is-source { color: var(--xhs-success); }
+.xhs-dl-src.is-soft { color: var(--xhs-info); }
+.xhs-dl-src.is-dom { color: var(--xhs-warn); }
+.xhs-dl-src:disabled { cursor: default; }
+.xhs-dl-src:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+  border-radius: var(--xhs-r-sm);
+}
+.xhs-dl-src-txt { font-size: 11px; font-weight: 500; }
+.xhs-dl-src-act {
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: var(--xhs-r-full);
+  font-size: 10px;
+}
+.xhs-dl-src:not(:disabled):hover .xhs-dl-src-act { background: var(--xhs-bg-hover); }
+
 /* --------------------------- 工具条 --------------------------- */
 .xhs-dl-toolbar {
   flex: 0 0 auto;
@@ -301,10 +342,10 @@ var XHS_DL_CSS = `
 }
 .xhs-dl-tag.is-live { background: var(--xhs-red); }
 /* 评论语音：用偏冷的中性色，和「实况」的红色区分开 */
-.xhs-dl-tag.is-audio { background: #3f6ad8; }
+.xhs-dl-tag.is-audio { background: var(--xhs-info); }
 .xhs-dl-ph.is-audio {
   background: var(--xhs-bg-sub);
-  color: #3f6ad8;
+  color: var(--xhs-info);
 }
 /* 视频封面占位：XHS 自定义播放器常常不给 <video> 设 poster，
    这时直接告诉用户「视频封面（缩略图未获取到）」比空盒友好。 */
