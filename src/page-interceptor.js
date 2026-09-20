@@ -732,7 +732,8 @@
     return str(get(o, 'url')) || str(get(o, 'url_default')) || str(get(o, 'url_pre')) || '';
   }
 
-  function commentImages(c) {
+  /** 未过滤的候选 URL（诊断用，也供 commentImages 复用） */
+  function commentImagesRaw(c) {
     var out = [];
     var pics = get(c, 'pictures') || get(c, 'images') || get(c, 'image_list');
     if (!Array.isArray(pics)) return out;
@@ -747,8 +748,12 @@
       // 兜底：图片对象上直接挂 url
       out.push(pickImgUrl(p));
     }
+    return uniqUrls(out);
+  }
+
+  function commentImages(c) {
     // 路径过滤：丢掉被 API 误带上的主图 / 表情包 / 资源树里的"目录条目"
-    return uniqUrls(out.filter(looksLikeCommentMedia));
+    return commentImagesRaw(c).filter(looksLikeCommentMedia);
   }
 
   function audioBlock(c) {
@@ -941,17 +946,29 @@
       emitNotes(obj, 'api:' + url.split('?')[0].slice(-40));
       // 评论接口（/api/sns/web/v2/comment/page）的响应同样走这里
       var cmtOk = emitCommentMedia(obj);
-      // 诊断：评论接口有没有被接到、响应长什么样、取出多少
+      // 诊断：评论接口有没有被接到、整批里到底有几条带媒体、提取/过滤各剩多少。
+      // 早期版本只打"首条评论的字段名"，首条是纯文字时会显示"提取=无"，
+      // 让人误以为失败 —— 实际上同一批里第 2~N 条可能带着图片。
       if (url && url.toLowerCase().indexOf('comment') !== -1) {
         try {
           var d0 = obj && obj.data;
           var arr = (d0 && (d0.comments || d0.comment_list)) || obj.comments || obj.comment_list || [];
-          console.log('[XHS-DL 诊断] 评论接口 ' + url.split('?')[0] +
-            ' | 顶层键=' + Object.keys(obj || {}).join(',') +
-            ' | data键=' + (d0 ? Object.keys(d0).join(',') : '-') +
-            ' | comments数=' + (Array.isArray(arr) ? arr.length : 0) +
-            ' | 首条键=' + (Array.isArray(arr) && arr[0] ? Object.keys(arr[0]).join(',') : '-') +
-            ' | 提取=' + (cmtOk ? '有' : '无'));
+          arr = Array.isArray(arr) ? arr : [];
+          var withPic = 0, withAudio = 0, rawUrls = 0, keptUrls = 0;
+          for (var ci = 0; ci < arr.length; ci++) {
+            var cc = arr[ci];
+            if (!isObj(cc)) continue;
+            if (get(cc, 'pictures')) withPic++;
+            if (audioBlock(cc)) withAudio++;
+            var cand = commentImagesRaw(cc).concat(commentAudios(cc));
+            rawUrls += cand.length;
+            keptUrls += cand.filter(looksLikeCommentMedia).length;
+          }
+          console.log('[XHS-DL 诊断] 评论接口 ' + url.split('?')[0].slice(-40) +
+            ' | 评论数=' + arr.length +
+            ' | 带图=' + withPic + ' 带语音=' + withAudio +
+            ' | URL候选=' + rawUrls + ' 过路径过滤=' + keptUrls +
+            ' | 投递=' + (cmtOk ? 'YES' : 'NO'));
         } catch (e) { /* 忽略 */ }
       }
     } catch (e) { /* 非 JSON，忽略 */ }

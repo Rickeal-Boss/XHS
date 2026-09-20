@@ -72,6 +72,15 @@
     return out;
   }
 
+  /** 按 commentId 去重合并（多次分页响应会陆续到达） */
+  function byIdOf(list) {
+    var byId = Object.create(null);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].commentId) byId[list[i].commentId] = list[i];
+    }
+    return byId;
+  }
+
   /**
    * 评论区媒体白名单。
    * 与 sanitizeNote 一样：页面世界的数据可被页面自身脚本伪造，
@@ -509,11 +518,18 @@
       }
 
       case 'COMMENT_MEDIA': {
-        var items = sanitizeCommentMedia(d.payload && d.payload.items);
+        var raw = (d.payload && d.payload.items) || [];
+        var items = sanitizeCommentMedia(raw);
+        // 诊断：拦截器投递了多少、白名单清洗后剩多少、面板累计多少。
+        // 这一步能区分"页面世界没取到"和"隔离世界把数据洗掉了"。
+        try {
+          console.log('[XHS-DL 诊断] 收到 COMMENT_MEDIA: 原始=' + raw.length +
+            ' 清洗后=' + items.length +
+            ' 累计=' + Object.keys(byIdOf(commentMedia.concat(items))).length);
+        } catch (e) { /* 忽略 */ }
         if (!items.length) break;
         // 多次分页响应会陆续到达，按 commentId 去重后合并
-        var byId = Object.create(null);
-        commentMedia.concat(items).forEach(function (it) { byId[it.commentId] = it; });
+        var byId = byIdOf(commentMedia.concat(items));
         commentMedia = Object.keys(byId).map(function (k) { return byId[k]; });
         XHS_DL_UI.setCommentMedia(commentMedia);
         break;
