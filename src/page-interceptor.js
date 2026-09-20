@@ -1226,10 +1226,18 @@
 
   function respondRescan() {
     var ok = scanInitialState('rescan');
+    var accepted = ok && lastEmitAccepted;
     // 刷新时无条件再跑一次内联 script 扫描：用户点「刷新」通常是因为
     // 面板数据不对，此时多扫一条路径成本很低，但能救回 INITIAL_STATE
     // 已被 SPA 替换 / 尚未就绪的情况。
-    ok = scanInlineScript() || ok;
+    //
+    // ⚠️ 但不能用它的返回值覆盖 accepted：内联脚本里是**首屏那份**状态，
+    // SPA 切换后它匹配的往往是上一篇笔记，emitNotes 会把 lastEmitAccepted
+    // 冲成 false。于是"源已经取到"却被诊断成"未取到源"（假阴性），
+    // 现场排查时会被这条假信号带偏。只有内联路径**真的**取到了当前笔记
+    // （返回值 true，此时 lastEmitAccepted 必然为真）才更新判定。
+    if (scanInlineScript()) accepted = lastEmitAccepted;
+    ok = ok || accepted;
     post('MEDIA_HINTS', { videos: mediaSink.videos.slice() });
 
     // 前两级都拿不到当前笔记时才上软刷新。节流 3s：用户连点刷新不应反复
@@ -1268,7 +1276,7 @@
       ok: ok,
       // accepted 才是"取到了源"的唯一可信判定：ok 只代表投递过一条 NOTE，
       // 不代表是这一条（可能被隔离世界的串台防护拒掉）。
-      accepted: ok && lastEmitAccepted,
+      accepted: accepted,
       pendingSoftRefresh: false,
       hookActive: hooks.installed,
       diag: diagSnapshot('scan')
