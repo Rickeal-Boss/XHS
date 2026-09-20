@@ -169,7 +169,11 @@ function load(opts) {
       if (!runtimeListener) throw new Error('runtime.onMessage 监听未注册');
       runtimeListener(msg, { id: 'test-ext-id' }, function () {});
     },
-    diag: function () { return windowRef.__XHS_DL_DIAG__(); }
+    // 旧版本没有这个钩子，返回 null 让断言正常报错，而不是让整个套件崩掉
+    diag: function () {
+      return (windowRef && typeof windowRef.__XHS_DL_DIAG__ === 'function')
+        ? windowRef.__XHS_DL_DIAG__() : null;
+    }
   };
 }
 
@@ -309,14 +313,14 @@ H.suite('SPA 取源 — 诊断快照 __XHS_DL_DIAG__');
 
 var J = load();
 ok('SPA-8', '暴露 window.__XHS_DL_DIAG__', typeof J.diag === 'function');
-var d0 = J.diag();
+var d0 = J.diag() || {};
 deepEq('SPA-8b', '无数据时的快照字段齐全且为空', d0, {
   noteId: null, source: null, imageCount: 0, hasVideo: false,
   commentCount: 0, degraded: false, navSeq: 0, softRefresh: 'idle'
 });
 J.fire('NOTE', noteRaw(NOTE_ID, 'initial-state'));
 J.fire('RESCAN_DONE', { noteId: NOTE_ID, ok: true, accepted: true, diag: { navSeq: 42, softRefresh: 'idle' } });
-var d1 = J.diag();
+var d1 = J.diag() || {};
 eq('SPA-8c', '快照读出当前 noteId', d1.noteId, NOTE_ID);
 eq('SPA-8d', '快照读出来源', d1.source, 'initial-state');
 eq('SPA-8e', '快照读出图片数', d1.imageCount, 1);
@@ -325,7 +329,7 @@ eq('SPA-8g', '非 dom 来源时 degraded=false', d1.degraded, false);
 
 var K = load({ imgSrcs: IMG });
 K.fire('RESCAN_DONE', { noteId: NOTE_ID, ok: true, accepted: false, diag: { navSeq: 9, softRefresh: 'failed' } });
-var d2 = K.diag();
+var d2 = K.diag() || {};
 eq('SPA-9', 'DOM 降级后快照 degraded=true', d2.degraded, true);
 eq('SPA-9b', 'DOM 降级后快照 source=dom', d2.source, 'dom');
 eq('SPA-9c', 'DOM 降级后快照图数来自 DOM 兜底', d2.imageCount, 2);

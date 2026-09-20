@@ -11,6 +11,7 @@ var suites = [
   ['test-downloader.js', ['TZ=UTC']],
   ['test-background.js', []],
   ['test-extractor.js', []],
+  ['test-content-spa.js', []],
   ['test-static.js', []]
 ];
 
