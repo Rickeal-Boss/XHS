@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "小红书图片视频实况下载助手",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "一键下载小红书笔记的图片、视频与实况照片（Live Photo）。支持原图/原画质、自定义命名模板、批量下载。",
   "minimum_chrome_version": "111",
   "author": "Rickeal-Boss",
