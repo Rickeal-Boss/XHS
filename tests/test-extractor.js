@@ -837,6 +837,81 @@ async function main() {
     !!(rcMsg && typeof rcMsg.msg.payload.navSeq === 'number' && rcMsg.msg.payload.navSeq > 0),
     'navSeq=' + (rcMsg && rcMsg.msg.payload.navSeq));
 
+  /* ---- spaSource 开关：关闭后不得再软刷新 ---- */
+  H.suite('spaSource 开关控制软刷新');
+
+  /**
+   * 现有 makeFetchStub 只给 clone() 挂了 text()，而软刷新走的是 response.text()，
+   * 所以这里单独做一个同时提供 text() 的桩（否则软刷新恒失败，测不出开关）。
+   */
+  function ssrFetchStub() {
+    var stats = { called: [] };
+    var body = '<html><script>window.__INITIAL_STATE__ = ' + JSON.stringify({
+      noteDetailMap: (function () { var m = {}; m[ID_B] = { note: noteB() }; return m; })()
+    }) + ';</script></html>';
+    var fn = function (url) {
+      stats.called.push(String(url));
+      return Promise.resolve({
+        ok: true,
+        headers: { get: function (n) { return String(n).toLowerCase() === 'content-type' ? 'text/html' : null; } },
+        clone: function () { return { text: function () { return Promise.resolve(body); } }; },
+        text: function () { return Promise.resolve(body); }
+      });
+    };
+    fn.__stats = stats;
+    return fn;
+  }
+
+  function fireMsg(h, type, payload) {
+    h.fireWindow('message', {
+      source: h.windowRef, origin: ORIGIN,
+      data: { __channel: 'xhs-dl', type: type, payload: payload }
+    });
+  }
+  function pendingCount(h) {
+    return h.messages.filter(function (m) {
+      return m.msg && m.msg.type === 'RESCAN_DONE' && m.msg.payload && m.msg.payload.pendingSoftRefresh;
+    }).length;
+  }
+
+  // URL 指向 ID_B，但页面 state 里没有它 → 只能靠软刷新救
+  var sfOff = ssrFetchStub();
+  var spOff = load({ initialState: { noteDetailMap: {} }, pathname: '/explore/' + ID_B, fetch: sfOff });
+  fireMsg(spOff, 'SET_SPA_SOURCE', { enabled: false });
+  spOff.messages.length = 0;
+  fireMsg(spOff, 'REQUEST_RESCAN');
+  eq('SPA-OFF-1', 'spaSource=false 时不发起软刷新（无 pendingSoftRefresh）', pendingCount(spOff), 0);
+  eq('SPA-OFF-2', 'spaSource=false 时不 fetch 重取页面', sfOff.__stats.called.length, 0);
+
+  var sfOn = ssrFetchStub();
+  var spOn = load({ initialState: { noteDetailMap: {} }, pathname: '/explore/' + ID_B, fetch: sfOn });
+  fireMsg(spOn, 'SET_SPA_SOURCE', { enabled: true });
+  spOn.messages.length = 0;
+  fireMsg(spOn, 'REQUEST_RESCAN');
+  eq('SPA-ON-1', 'spaSource=true 时发起软刷新（有 pendingSoftRefresh）', pendingCount(spOn), 1);
+  eq('SPA-ON-2', 'spaSource=true 时确实 fetch 了当前页面', sfOn.__stats.called.length, 1);
+
+  // 默认（从未收到 SET_SPA_SOURCE）应保持开启，不能因为消息缺失而失效
+  var sfDef = ssrFetchStub();
+  var spDef = load({ initialState: { noteDetailMap: {} }, pathname: '/explore/' + ID_B, fetch: sfDef });
+  spDef.messages.length = 0;
+  fireMsg(spDef, 'REQUEST_RESCAN');
+  eq('SPA-DEF-1', '未收到 SET_SPA_SOURCE 时默认开启软刷新', pendingCount(spDef), 1);
+
+  // 开关随 REQUEST_RESCAN 一起下发（不依赖 SET_SPA_SOURCE 是否送达）
+  var sfReq = ssrFetchStub();
+  var spReq = load({ initialState: { noteDetailMap: {} }, pathname: '/explore/' + ID_B, fetch: sfReq });
+  spReq.messages.length = 0;
+  fireMsg(spReq, 'REQUEST_RESCAN', { spaSource: false });
+  eq('SPA-REQ-OFF-1', '请求里 spaSource=false 时不发起软刷新', pendingCount(spReq), 0);
+  eq('SPA-REQ-OFF-2', '请求里 spaSource=false 时不 fetch 页面', sfReq.__stats.called.length, 0);
+
+  var sfReq2 = ssrFetchStub();
+  var spReq2 = load({ initialState: { noteDetailMap: {} }, pathname: '/explore/' + ID_B, fetch: sfReq2 });
+  spReq2.messages.length = 0;
+  fireMsg(spReq2, 'REQUEST_RESCAN', { spaSource: true });
+  eq('SPA-REQ-ON-1', '请求里 spaSource=true 时发起软刷新', pendingCount(spReq2), 1);
+
   var S = H.summary('test-extractor.js');
   process.exit(S.fail ? 1 : 0);
 }

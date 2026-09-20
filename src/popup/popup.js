@@ -155,13 +155,20 @@
     });
 
     els.btnOptions.addEventListener('click', function () {
-      // openOptionsPage 是异步切 tab：浏览器要先 focus 到 settings 标签页，
-      // 完成后才会调回调。若紧跟 window.close()，关 popup 会和切页竞争，
-      // 表现为"点了设置按钮什么也没发生"——这是本次的现场 bug。
-      // 兜底超时 1s：万一回调永远不来（极端情况），也别让 popup 一直挂着。
-      var done = false;
-      chrome.runtime.openOptionsPage(function () { done = true; window.close(); });
-      setTimeout(function () { if (!done) window.close(); }, 1000);
+      // ⚠️ 不要在这里 window.close()。
+      // 新标签页获得焦点时 popup 本来就会自动关闭；主动 close 会和浏览器
+      // 创建/聚焦设置页的动作竞争，把打开动作一起掐掉 ——
+      // 表现就是"点了设置按钮什么也没发生"。
+      // 之前这里紧跟 close()、后来改成回调里 close，都仍然复现该问题，
+      // 因此彻底不关：万一打开失败，popup 还留着，用户至少能再点一次。
+      try {
+        chrome.runtime.openOptionsPage();
+      } catch (e) {
+        // 极端情况下的兜底：直接用扩展自己的页面 URL 打开
+        try {
+          window.open(chrome.runtime.getURL('src/options/options.html'), '_blank');
+        } catch (e2) { /* 忽略 */ }
+      }
     });
   }
 

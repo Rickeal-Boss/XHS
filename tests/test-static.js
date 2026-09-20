@@ -810,5 +810,25 @@ inputIds.forEach(function (id) {
     bound ? '' : 'options.js 中找不到 ' + id + '.addEventListener');
 });
 
+/* ================================================================== */
+/* PART A-10 — popup 打开设置页不得与 window.close() 竞争                */
+/* ================================================================== */
+/**
+ * 踩过的坑：openOptionsPage() 是异步创建/聚焦标签页，紧跟 window.close()
+ * （或在其回调里 close）都会与之竞争，把打开动作掐掉 —— 表现是
+ * "点了设置按钮什么也没发生"。新标签页获得焦点时 popup 本就会自动关闭，
+ * 所以这里根本不需要主动 close。
+ */
+H.suite('popup 打开设置页不与关闭竞争');
+var popupSrc = read('src/popup/popup.js');
+var oi = popupSrc.indexOf('openOptionsPage');
+ok('POP-1', 'popup.js 中存在 openOptionsPage 调用', oi !== -1);
+if (oi !== -1) {
+  var seg = popupSrc.slice(oi, oi + 500);
+  ok('POP-2', 'openOptionsPage 之后不得紧跟 window.close()（会掐掉打开动作）',
+    seg.indexOf('window.close') === -1,
+    seg.indexOf('window.close') === -1 ? '' : '片段内出现了 window.close');
+}
+
 var S = H.summary('test-static.js');
 process.exit(S.fail ? 1 : 0);

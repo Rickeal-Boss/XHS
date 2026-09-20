@@ -671,7 +671,15 @@
   });
 
   function requestRescan() {
-    window.postMessage({ __channel: CHANNEL, type: 'REQUEST_RESCAN' }, targetOrigin());
+    // 软刷新开关**随每次请求一起下发**，而不是只靠 SET_SPA_SOURCE 那条独立消息。
+    // 原因：那条消息是"设置变化时推一次"的，一旦因时序/重载等原因没送达，
+    // 页面侧就会一直保持默认开启 —— 用户关了开关却仍在自动软刷新。
+    // 把值放进请求里，页面侧每次都能拿到最新开关，不再依赖消息是否送达。
+    window.postMessage({
+      __channel: CHANNEL,
+      type: 'REQUEST_RESCAN',
+      payload: { spaSource: settings.spaSource !== false }
+    }, targetOrigin());
   }
 
   /* ========================= 下载 ========================= */

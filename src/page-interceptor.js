@@ -1314,6 +1314,12 @@
     var d = ev.data;
     if (!d || d.__channel !== CHANNEL) return;
     if (d.type === 'REQUEST_RESCAN') {
+      // 开关以**本次请求里带的**为准：SET_SPA_SOURCE 是"设置变化时推一次"的，
+      // 万一没送达，页面侧会一直停在默认开启，用户就关不掉自动软刷新。
+      // 请求里每次都带，才是可靠的取值来源。
+      if (d.payload && typeof d.payload.spaSource === 'boolean') {
+        spaSourceEnabled = d.payload.spaSource;
+      }
       respondRescan();
     } else if (d.type === 'SET_HOOK') {
       try {
