@@ -155,6 +155,10 @@ var XHS_DL_CSS = `
   display: none;
   flex-direction: column;
 }
+/* 面板容器带 tabindex="-1"，打开时被脚本聚焦以播报 dialog 名称。它是容器
+   不是控件，不该出现整块 focus ring（键盘打开面板时会被描边，视觉变化）。 */
+.xhs-dl-panel:focus,
+.xhs-dl-panel:focus-visible { outline: none; }
 .xhs-dl-panel.is-open {
   display: flex;
   animation: xhs-dl-in .26s cubic-bezier(.23, 1, .32, 1);

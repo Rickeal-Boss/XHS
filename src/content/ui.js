@@ -25,6 +25,8 @@ var XHS_DL_UI = (function () {
   var busy = false;
   var pos = { left: null, top: null };
   var mediaHints = { videos: [] };
+  /* 打开面板前的焦点元素：关闭时归还，键盘用户才不会被丢回文档开头。 */
+  var lastFocus = null;
 
   /* 评论区媒体：独立分区、独立勾选。
      默认不勾选 —— 评论可能几十上百条，自动全选会把下载目录刷爆。 */
@@ -81,7 +83,13 @@ var XHS_DL_UI = (function () {
       var inner = it.kind === 'audio'
         ? '<div class="xhs-dl-ph is-audio">' + ICON.audio + '</div>'
         : '<img src="' + esc(it.url) + '" referrerpolicy="no-referrer" loading="lazy" alt="">';
-      h.push('<div class="xhs-dl-item' + (on ? ' is-checked' : '') + '" data-ckey="' + esc(it.key) + '">' +
+      // 条目是裸 div，默认键盘不可达、屏幕阅读器也读不出「这是一张可选的图」。
+      // 补 role/tabindex/aria-checked/aria-label 后语义完整；勾选态与 is-checked
+      // 类同源，重新 render 时一并刷新，不会出现「视觉已勾、aria 未勾」。
+      var label = it.kind === 'audio' ? '评论语音 ' + (it.seq + 1) : '评论图片 ' + (it.seq + 1);
+      h.push('<div class="xhs-dl-item' + (on ? ' is-checked' : '') + '" data-ckey="' + esc(it.key) + '"' +
+        ' role="checkbox" tabindex="0" aria-checked="' + (on ? 'true' : 'false') + '"' +
+        ' aria-label="' + esc(label) + '">' +
         tag + '<span class="xhs-dl-tick">' + ICON.check + '</span>' + inner + '</div>');
     });
     h.push('</div></div>');
@@ -152,6 +160,12 @@ var XHS_DL_UI = (function () {
     els.panel = el('div', 'xhs-dl-panel');
     els.panel.setAttribute('role', 'dialog');
     els.panel.setAttribute('aria-label', '小红书下载助手');
+    // aria-modal 只作用于可访问性树（告知辅助技术这是模态层），与显隐无关：
+    // 显隐仍由 .is-open 类驱动，绝不能用 hidden 属性（见 open/close 上方注释）。
+    els.panel.setAttribute('aria-modal', 'true');
+    // tabindex=-1 让容器可被脚本聚焦 —— 打开面板时把焦点移进来，屏幕阅读器
+    // 才会播报对话框名称。它不进入 Tab 序列，因此不影响原有键盘路径。
+    els.panel.setAttribute('tabindex', '-1');
 
     els.toasts = el('div', 'xhs-dl-toasts');
 
@@ -216,6 +230,7 @@ var XHS_DL_UI = (function () {
     els.cancelBtn = els.panel.querySelector('button[data-act="cancel"]');
 
     els.panel.addEventListener('click', onPanelClick);
+    els.panel.addEventListener('keydown', onPanelKeydown);
     els.panel.addEventListener('change', function (e) {
       if (!e.target) return;
       var a = e.target.getAttribute('data-act');
@@ -225,24 +240,112 @@ var XHS_DL_UI = (function () {
     els.mask.addEventListener('click', close);
   }
 
+  /** 勾选会整体重建 body 的 innerHTML，旧节点被销毁、焦点会掉回 body ——
+      键盘用户按一次 Space 就「掉队」，得从头 Tab 回来。这里在重建后按
+      data-ckey / data-idx 找回同一个条目并还原焦点。仅在键盘路径调用，
+      鼠标点击不需要（也不该）把焦点抢到条目上。 */
+  function refocusItem(attr, val) {
+    if (!els.body || !els.body.querySelectorAll) return;
+    var list = els.body.querySelectorAll('.xhs-dl-item');
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].getAttribute(attr) === val) {
+        if (typeof list[i].focus === 'function') list[i].focus();
+        return;
+      }
+    }
+  }
+
+  /** 条目激活：点击与键盘（Enter/Space）共用同一套判定，行为不可能漂移。
+      必须先判 data-ckey（评论区）再判 data-idx —— 否则 Number(null) 会退化成 0，
+      点评论区任意一项都会错误地切换笔记第 1 张图的勾选。
+      fromKeyboard 为真时在重建后还原焦点。
+      返回 true 表示已处理（键盘路径据此决定是否 preventDefault）。 */
+  function activateItem(target, fromKeyboard) {
+    var citem = target && target.closest ? target.closest('[data-ckey]') : null;
+    if (citem) {
+      var ckey = citem.getAttribute('data-ckey');
+      toggleCommentKey(ckey);
+      if (fromKeyboard) refocusItem('data-ckey', ckey);
+      return true;
+    }
+
+    // 媒体卡片：切换勾选（优先判断，卡片内部不含 data-act 元素）
+    var item = target && target.closest ? target.closest('.xhs-dl-item') : null;
+    if (item && item.getAttribute('data-idx') !== null) {
+      var idx = item.getAttribute('data-idx');
+      toggleIndex(Number(idx));
+      if (fromKeyboard) refocusItem('data-idx', idx);
+      return true;
+    }
+    return false;
+  }
+
+  /* 面板内可聚焦元素（供 Tab 循环使用）。过滤掉 disabled 与不可见项：
+     隐藏的取源徽标 / 未启用的按钮若留在列表里，Tab 会把焦点送到
+     不可见元素上，浏览器随即把焦点丢回 body —— 等于焦点逃出面板。 */
+  var FOCUS_SEL = 'a[href],button:not([disabled]),input:not([disabled]),' +
+    'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+
+  function focusables() {
+    if (!els.panel || !els.panel.querySelectorAll) return [];
+    var list = els.panel.querySelectorAll(FOCUS_SEL);
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      // offsetParent 为 null 说明自身或祖先 display:none（含 [hidden]）。
+      if (list[i].offsetParent === null) continue;
+      out.push(list[i]);
+    }
+    return out;
+  }
+
+  /* 焦点陷阱：Tab / Shift+Tab 在面板内首尾循环。
+     面板是注入宿主页面的浮层，不循环的话 Tab 会跑到页面正文里，键盘用户
+     再也回不到面板。实现刻意保持最小：只在能算出可聚焦元素时才拦截，
+     算不出来（列表为空，例如元素尚未布局）就完全交回浏览器默认行为，
+     宁可漏掉循环也不把焦点锁死。 */
+  function trapTab(ev) {
+    var list = focusables();
+    if (!list.length) return;
+    var at = -1;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] === ev.target) { at = i; break; }
+    }
+    // at === -1：焦点在面板容器自身（tabindex=-1）或非可聚焦子节点上，
+    // 此时正向落到第一个、反向落到最后一个，保证 Tab 不会直接出界。
+    if (ev.shiftKey) {
+      if (at === 0 || at === -1) { list[list.length - 1].focus(); ev.preventDefault(); }
+    } else if (at === list.length - 1 || at === -1) {
+      list[0].focus();
+      ev.preventDefault();
+    }
+  }
+
+  function onPanelKeydown(ev) {
+    var key = ev.key;
+
+    // Esc 关闭：bindGlobal 在 document 捕获阶段也有一份（用于焦点在面板外
+    // 的兜底）。这里再判一次 isOpen()，避免同一次 Esc 触发两次 close()，
+    // 把 handlers.onClose 重复调一遍。
+    if (key === 'Escape') {
+      if (isOpen()) close();
+      return;
+    }
+
+    if (key === 'Tab') { trapTab(ev); return; }
+
+    // 条目是 div，浏览器不会为它合成 click 事件；Enter / Space 需要手动映射到
+    // 与点击完全相同的切换逻辑。Space 必须 preventDefault，否则会滚动页面。
+    // 只在真的命中条目时才拦，按钮的 Enter/Space 原生行为不受影响。
+    if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
+      if (activateItem(ev.target, true)) ev.preventDefault();
+    }
+  }
+
   function onPanelClick(ev) {
     var target = ev.target;
 
-    // 0) 评论区条目：同样复用 .xhs-dl-item，但用 data-ckey 区分。
-    //    必须排在笔记卡片之前判断 —— 否则 Number(null) 会退化成 0，
-    //    点评论区任意一项都会错误地切换笔记第 1 张图的勾选。
-    var citem = target.closest ? target.closest('[data-ckey]') : null;
-    if (citem) {
-      toggleCommentKey(citem.getAttribute('data-ckey'));
-      return;
-    }
-
-    // 1) 媒体卡片：切换勾选（优先判断，卡片内部不含 data-act 元素）
-    var item = target.closest ? target.closest('.xhs-dl-item') : null;
-    if (item && item.getAttribute('data-idx') !== null) {
-      toggleIndex(Number(item.getAttribute('data-idx')));
-      return;
-    }
+    // 0/1) 媒体卡片与评论条目：切换勾选（与键盘路径共用 activateItem）
+    if (activateItem(target)) return;
 
     // 2) 具名动作按钮
     var btn = target.closest ? target.closest('[data-act]') : null;
@@ -357,9 +460,35 @@ var XHS_DL_UI = (function () {
 
   function isBusy() { return busy; }
 
+  /** 记录打开面板前的焦点元素，供关闭时归还。
+      焦点已在面板内部（重复 open）或落在 shadow 宿主上时不覆盖记录，
+      否则会把记录冲成面板自身 / 宿主 div，关闭后焦点等于丢了。 */
+  function rememberFocus() {
+    var ae = document.activeElement;
+    if (!ae || ae === els.panel) return;
+    if (shadow && shadow.host && ae === shadow.host) return;
+    if (els.panel.contains && els.panel.contains(ae)) return;
+    lastFocus = ae;
+  }
+
+  /** 关闭时把焦点还给打开前的元素；元素已被宿主页面移除则放弃。 */
+  function restoreFocus() {
+    var t = lastFocus;
+    lastFocus = null;
+    if (!t || typeof t.focus !== 'function') return;
+    // isConnected === false 说明该元素已经不在文档里，focus() 会静默失败
+    // 并把焦点留在 body，不如直接放弃、让浏览器按默认规则处理。
+    if (t.isConnected === false) return;
+    t.focus();
+  }
+
   function open() {
     els.panel.classList.add('is-open');
     els.mask.classList.add('is-open');
+    // 焦点管理：先记住原焦点，再移入面板。不移焦的话键盘用户按 Enter
+    // 打开面板后，焦点仍停在悬浮球上，屏幕阅读器不会知道面板出现了。
+    rememberFocus();
+    if (typeof els.panel.focus === 'function') els.panel.focus();
     // 每次打开都重置一次进度显示 —— 用户关闭面板后可能有上一次批次的
     // DL_ALL_DONE 早已把进度条推到 "0 / 33" 之类的状态，再开时会被误读为
     // "当前这批全部失败"。
@@ -368,8 +497,12 @@ var XHS_DL_UI = (function () {
   }
 
   function close() {
+    var was = isOpen();
     els.panel.classList.remove('is-open');
     els.mask.classList.remove('is-open');
+    // 只有真的从「打开」转到「关闭」才归还焦点：Esc 会被面板内与 document
+    // 捕获两处监听各调一次 close()，若无条件归还，第二次会把焦点抢走。
+    if (was) restoreFocus();
     if (handlers.onClose) handlers.onClose();
   }
 
@@ -460,7 +593,9 @@ var XHS_DL_UI = (function () {
     if (note.video) {
       var checked = selected.indexOf(-1) !== -1;
       html.push(
-        '<div class="xhs-dl-item' + (checked ? ' is-checked' : '') + '" data-idx="-1">' +
+        '<div class="xhs-dl-item' + (checked ? ' is-checked' : '') + '" data-idx="-1"' +
+        ' role="checkbox" tabindex="0" aria-checked="' + (checked ? 'true' : 'false') + '"' +
+        ' aria-label="视频">' +
         '<span class="xhs-dl-tag">视频</span>' +
         '<span class="xhs-dl-tick">' + ICON.check + '</span>' +
         (note.video.cover
@@ -482,8 +617,11 @@ var XHS_DL_UI = (function () {
       var checked = selected.indexOf(img.index) !== -1;
       var tag = img.isLive ? '<span class="xhs-dl-tag is-live">实况</span>' : '';
       var src = img.urlDefault || '';
+      var label = (img.isLive ? '实况照片 ' : '图片 ') + (img.index + 1);
       html.push(
-        '<div class="xhs-dl-item' + (checked ? ' is-checked' : '') + '" data-idx="' + img.index + '">' +
+        '<div class="xhs-dl-item' + (checked ? ' is-checked' : '') + '" data-idx="' + img.index + '"' +
+        ' role="checkbox" tabindex="0" aria-checked="' + (checked ? 'true' : 'false') + '"' +
+        ' aria-label="' + esc(label) + '">' +
         tag +
         '<span class="xhs-dl-tick">' + ICON.check + '</span>' +
         (src
