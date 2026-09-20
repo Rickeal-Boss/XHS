@@ -33,10 +33,6 @@
   var commentMedia = [];       // 评论区媒体（图片 / 语音音频）
   var mediaHints = { videos: [] };
   var hookDisabledNotified = false;
-  // 最近一次 RESCAN_DONE 带来的导航序号。页面世界每次 SPA 切换都会自增，
-  // 因此它能区分「这次重扫属于哪一次导航」，是排查"数据是上一篇的"的关键线索。
-  // 供 window.__XHS_DL_DIAG__() 读出，真机脚本靠它确认自己看的是最新一次结果。
-  var lastNavSeq = 0;
 
   /**
    * 入站数据白名单。
@@ -308,6 +304,11 @@
   /**
    * 最近一次路由切换序号与软刷新结果，来自 RESCAN_DONE.diag。
    * 只用于诊断输出，不影响业务逻辑。
+   *
+   * lastNavSeq：页面世界每次 SPA 切换都会自增，因此它能回答「这次重扫属于哪一次导航」，
+   * 是辨别"数据是上一篇的"的关键线索；window.__XHS_DL_DIAG__() 把它吐给真机脚本，
+   * 让脚本能确认自己读到的是最新一次导航的结果而不是陈旧快照。
+   * lastSoftRefresh：只用于在降级横幅里区分"压根没试过"和"试过但失败了"。
    */
   var lastNavSeq = 0;
   var lastSoftRefresh = 'idle';
@@ -483,7 +484,14 @@
     };
   }
 
-  function tryDomFallback() {
+  /**
+   * @param {Object} [diag] 触发本次兜底的那次 RESCAN_DONE 的 diag。
+   *   传入时用它判断"软刷新是否失败过"；不传（开面板 / 定时兜底 / popup 拉取等
+   *   非重扫路径）就不提软刷新。必须按**本次**的 diag 判断而不是用全局
+   *   lastSoftRefresh —— 否则上一次导航软刷新失败后，本导航因别的原因降级
+   *   也会挂上"已尝试自动重新取源但失败"，横幅就成了假信号。
+   */
+  function tryDomFallback(diag) {
     try {
       var raw = domFallback();
       if (raw && raw.__scanStats) {
@@ -503,8 +511,11 @@
           hint = '未能读取页面数据，已降级为 DOM 提取，原图/原画质不可用。如部分图下载失败，请滚动页面让图片加载完成后再点「重扫」。';
         }
         // 软刷新（同源 fetch 重取 SSR HTML）也失败过，才告诉用户"已经努力过了"，
-        // 避免用户误以为扩展根本没尝试自动恢复。
-        if (lastSoftRefresh === 'failed') hint += '（已尝试自动重新取源但失败）';
+        // 避免用户误以为扩展根本没尝试自动恢复。只在本次重扫确实试过时才加，
+        // 否则这条提示本身就是在撒谎。
+        if (diag && diag.softRefresh === 'failed') {
+          hint += '（已尝试自动重新取源但失败）';
+        }
         XHS_DL_UI.setBanner(hint, 'warn');
         updateBadge();
       } else {
@@ -599,7 +610,7 @@
           } catch (e) { /* 忽略 */ }
         }
         if (!current) {
-          tryDomFallback();
+          tryDomFallback(rdiag);
           if (!current) XHS_DL_UI.toast('没有识别到笔记数据', 'error');
         }
         break;
