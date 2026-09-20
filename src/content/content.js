@@ -633,23 +633,58 @@
 
   /* ========================= 下载 ========================= */
 
+  /**
+   * 批次看门狗。
+   *
+   * 后台是 MV3 Service Worker，空闲约 30 秒就会被浏览器回收；一旦在批次
+   * 执行中途被回收，DL_ALL_DONE 可能永远等不到，UI 就永久停在 busy 状态
+   * —— 此后任何下载都被"上一批还没结束"拒绝。
+   * background 那边已经做了"重启即补发 interrupted"的自检，这里是第二道
+   * 保险：只要超过 10 分钟没收到任何进度消息，就自行解锁并提示用户重试，
+   * 宁可误报也不要让用户彻底用不了。
+   */
+  var batchWatchdog = null;
+  var BATCH_WATCHDOG_MS = 10 * 60 * 1000;
+
+  function stopBatchWatchdog() {
+    if (batchWatchdog) { clearTimeout(batchWatchdog); batchWatchdog = null; }
+  }
+
+  function armBatchWatchdog() {
+    stopBatchWatchdog();
+    batchWatchdog = setTimeout(function () {
+      batchWatchdog = null;
+      XHS_DL_UI.setBusy(false);
+      XHS_DL_UI.hideProgress();
+      XHS_DL_UI.toast('下载长时间无响应，已自动结束等待，请重试', 'warn');
+    }, BATCH_WATCHDOG_MS);
+  }
+
+  /**
+   * @returns {boolean} 是否真的提交了一批下载。
+   *
+   * 返回值必须真实：popup 的「下载本笔记全部」此前无条件回 ok:true，
+   * 于是忙碌时点了按钮 → 这里被守门 return → popup 显示「已提交下载…」
+   * 并关闭，实际一个文件都没下。用户完全无从察觉。
+   */
   function doDownload(note, selected) {
     // 防止同一秒内连点造成 background 收到多批 DOWNLOAD_BATCH；
     // 之前没有这个守门，连点会触发多个 runBatch，结果互相干扰、计数翻倍
     // （用户看到"33 个失败"可能就是早期连点留下的）。
     if (XHS_DL_UI.isBusy()) {
       XHS_DL_UI.toast('上一批下载还没结束，先等等', 'warn');
-      return;
+      return false;
     }
     var tasks = XHS_DL_DOWNLOADER.buildTasks(note, selected, settings);
     // 评论区媒体（图片 / 语音）：默认不勾选，勾了才追加任务
     var cmt = XHS_DL_UI.selectedCommentItems();
     if (cmt.length) {
-      tasks = tasks.concat(XHS_DL_DOWNLOADER.buildCommentTasks(cmt, settings));
+      // 第三个参数传笔记，让评论目录能按笔记分目录（不传时回退到 评论/）
+      tasks = tasks.concat(XHS_DL_DOWNLOADER.buildCommentTasks(cmt, settings, note));
     }
     if (!tasks.length) {
       XHS_DL_UI.toast('没有可下载的内容', 'error');
-      return;
+      return false;
     }
     XHS_DL_UI.setBusy(true);
     XHS_DL_UI.hideProgress();
@@ -657,6 +692,7 @@
       type: 'DOWNLOAD_BATCH',
       payload: { tasks: tasks, noteId: note.noteId }
     });
+    return true;
   }
 
   function onBackgroundMessage(msg, sender, sendResponse) {
@@ -674,8 +710,10 @@
       if (!current) { sendResponse({ ok: false, error: 'no-note' }); return false; }
       var all = current.images.map(function (i) { return i.index; });
       if (current.video) all.unshift(-1);
-      doDownload(current, all);
-      sendResponse({ ok: true });
+      // 必须回传真实结果：忙碌时 doDownload 会被守门拒绝，
+      // 若这里仍回 ok:true，popup 会显示"已提交下载…"并关闭，实际什么都没下。
+      var submitted = doDownload(current, all);
+      sendResponse({ ok: submitted, error: submitted ? '' : 'busy' });
       return false;
     }
 
@@ -689,15 +727,18 @@
     switch (msg.type) {
       case 'DL_START':
         XHS_DL_UI.setBusy(true);
+        armBatchWatchdog();
         XHS_DL_UI.setProgress(0, p.pending || p.total, '准备下载…');
         if (p.skipped) XHS_DL_UI.toast('已跳过 ' + p.skipped + ' 个重复文件');
         break;
 
       case 'DL_PROGRESS':
+        armBatchWatchdog();
         XHS_DL_UI.setProgress(p.done || 0, p.total || 0, p.current || '');
         break;
 
       case 'DL_ITEM_PROGRESS':
+        armBatchWatchdog();
         XHS_DL_UI.setProgress(p.done || 0, p.totalItems || 0,
           (p.name || '') + '  ' + (p.pct || 0) + '%');
         break;
@@ -707,7 +748,17 @@
         break;
 
       case 'DL_ALL_DONE': {
+        stopBatchWatchdog();
         XHS_DL_UI.setBusy(false);
+        // background 的 Service Worker 被浏览器回收后重启时，会发现上一批
+        // 没跑完，于是补发一个带 interrupted 的 DL_ALL_DONE 让 UI 解锁。
+        // 没有这一步，UI 会永久停在 busy 状态，此后任何下载都被
+        // "上一批还没结束"拒绝，用户只能刷新页面才能恢复。
+        if (p.interrupted) {
+          XHS_DL_UI.toast('上一批下载被浏览器中断，请重新下载', 'warn');
+          XHS_DL_UI.hideProgress();
+          break;
+        }
         var failed = (p.failed || []).length;
         if (failed === 0) {
           XHS_DL_UI.setProgress(p.total, p.total, '全部完成');
@@ -734,13 +785,26 @@
         ? (note.video.urlOrigin || note.video.urlStream)
         : (note.video.urlStream || note.video.urlOrigin));
     }
+    // 与 buildTasks 保持同一套判定，否则"复制到的直链"和"实际下载的直链"
+    // 会不一致：① video-only 时下载不产图片，复制却仍带上图片；
+    // ② 实况只取未排序的 img.liveVideoUrl，而下载取按画质排序后的第一条。
+    var liveMode = settings.liveMode || 'both';
+    var wantImage = liveMode !== 'video-only';
+    var preferQuality = settings.streamPreference === 'quality';
+
     note.images.forEach(function (img) {
       if (selected.indexOf(img.index) === -1) return;
-      var u = settings.imageFormat === 'default'
-        ? img.urlDefault
-        : (settings.imageFormat === 'jpg' ? (img.urlJpg || img.urlOrigin) : (img.urlOrigin || img.urlDefault));
-      if (u) urls.push(u);
-      if (img.liveVideoUrl && settings.liveMode !== 'image-only') urls.push(img.liveVideoUrl);
+      if (wantImage) {
+        var u = settings.imageFormat === 'default'
+          ? img.urlDefault
+          : (settings.imageFormat === 'jpg' ? (img.urlJpg || img.urlOrigin) : (img.urlOrigin || img.urlDefault));
+        if (u) urls.push(u);
+      }
+      if (liveMode === 'image-only') return;
+      var liveList = (preferQuality ? img.liveVideoUrlsBest : img.liveVideoUrls) || [];
+      if (!liveList.length) liveList = img.liveVideoUrls || img.liveVideoUrlsBest || [];
+      var live = liveList.length ? liveList[0] : img.liveVideoUrl;
+      if (live) urls.push(live);
     });
     return urls.filter(Boolean);
   }
