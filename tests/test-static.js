@@ -765,5 +765,50 @@ ok('PAGE-7', '观察项 O-04：HOOK_STATE 已发出但 content.js 未消费',
   'interceptor 发出的类型=' + JSON.stringify(interceptorEmits) +
   ' content.js 处理的类型=' + JSON.stringify(contentHandles));
 
+/* ================================================================== */
+/* PART A-9 — 设置页每个输入控件都必须真的绑了监听                       */
+/* ================================================================== */
+/**
+ * 踩过的坑：新增 spaSource 开关时只加了 HTML 复选框 + renderForm 回填，
+ * 忘了在 bind() 里 addEventListener —— 结果用户勾选不写 storage，
+ * 开关是死的（点了没反应，重载后回到默认值）。
+ * 这里把「HTML 里有 input id ⇒ options.js 里有对应监听」钉死。
+ */
+H.suite('设置页控件监听完整性');
+var optHtml = read('src/options/options.html');
+var optJs = read('src/options/options.js');
+
+// 取所有 <input ... id="xxx">
+var inputIds = [];
+var inputRe = /<input\b[^>]*\bid\s*=\s*"([^"]+)"/g;
+var im;
+while ((im = inputRe.exec(optHtml)) !== null) {
+  if (inputIds.indexOf(im[1]) === -1) inputIds.push(im[1]);
+}
+ok('OPT-1', 'options.html 里解析到 input 控件', inputIds.length > 0,
+  'ids=' + JSON.stringify(inputIds));
+
+// radio 组走 querySelectorAll 批量绑定，不在 els 上单独绑
+var radioNames = [];
+var radioRe = /<input\b[^>]*\bname\s*=\s*"([^"]+)"/g;
+var rm;
+while ((rm = radioRe.exec(optHtml)) !== null) {
+  if (radioNames.indexOf(rm[1]) === -1) radioNames.push(rm[1]);
+}
+
+inputIds.forEach(function (id) {
+  var bound = optJs.indexOf(id + '.addEventListener') !== -1;
+  // 退路：radio 组由 bind() 里的 forEach(group) 统一绑定
+  if (!bound) {
+    bound = radioNames.some(function (n) {
+      return optHtml.indexOf('id="' + id + '"') !== -1 &&
+        optHtml.slice(optHtml.indexOf('id="' + id + '"') - 200).indexOf('name="' + n + '"') !== -1 &&
+        optJs.indexOf("'" + n + "'") !== -1;
+    });
+  }
+  ok('OPT-LISTEN-' + id, 'options.js 为 #' + id + ' 绑定了监听（避免"控件是死的"）', bound,
+    bound ? '' : 'options.js 中找不到 ' + id + '.addEventListener');
+});
+
 var S = H.summary('test-static.js');
 process.exit(S.fail ? 1 : 0);

@@ -1091,6 +1091,7 @@
     if (typeof window.fetch === 'function') {
       var rawFetch = window.fetch;
       originals.fetch = rawFetch;
+      nativeFetch = rawFetch;   // 软刷新要用原生 fetch，避免被自己的钩子再旁路一遍
 
       var fakeFetch = function () {
         var args = arguments;
@@ -1209,8 +1210,22 @@
    *
    * @returns {Promise<boolean>} 是否真的取到并投递了当前笔记
    */
+  /**
+   * 必须用**原生** fetch，不能用 window.fetch：
+   * window.fetch 已被我们的钩子包裹，若 URL 命中 isApiUrl 且响应 CT 含 text，
+   * 钩子会 res.clone().text() 把整份 HTML 再全文读一遍 —— 白白多一份数百 KB
+   * 内存，而且这个请求本来就是我们自己发的，没必要再旁路一遍。
+   */
+  var nativeFetch = null;
+  /** 软刷新超时：fetch 挂起时不能让面板永久空着 */
+  var SOFT_REFRESH_TIMEOUT_MS = 8000;
+
   function softRefresh() {
-    return fetch(location.href, { credentials: 'include', headers: { Accept: 'text/html' } })
+    var doFetch = nativeFetch || window.fetch;
+    var work = doFetch.call(window, location.href, {
+      credentials: 'include',
+      headers: { Accept: 'text/html' }
+    })
       .then(function (r) { return r.text(); })
       .then(function (html) {
         if (!html || html.length > 3000000) return false;
@@ -1222,6 +1237,16 @@
         return emitNotes(st, 'soft-refresh');
       })
       .catch(function () { return false; });
+
+    // 超时保护：请求挂起时 respondRescan 的 .then 永不触发，
+    // 而隔离世界因为 pendingSoftRefresh 会一直等着、不做 DOM 兜底
+    // → 面板永久空白。宁可判定失败也要把流程走完。
+    return Promise.race([
+      work,
+      new Promise(function (resolve) {
+        setTimeout(function () { resolve(false); }, SOFT_REFRESH_TIMEOUT_MS);
+      })
+    ]);
   }
 
   function respondRescan() {

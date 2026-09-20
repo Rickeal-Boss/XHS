@@ -187,6 +187,14 @@
       save();
     });
 
+    // ⚠️ 新增开关必须记得在这里绑监听：只加 HTML 复选框 + renderForm 回填
+    // 是不够的 —— 没有 change 监听时用户勾选不会写回 storage，开关就是死的
+    // （点了没反应，且重载页面后回到默认值）。spaSource 就踩过这个坑。
+    els.spaSource.addEventListener('change', function () {
+      state.spaSource = els.spaSource.checked;
+      save();
+    });
+
     ['imageFormat', 'videoQuality', 'streamPreference', 'liveMode'].forEach(function (group) {
       var inputs = document.querySelectorAll('input[name="' + group + '"]');
       for (var i = 0; i < inputs.length; i++) {

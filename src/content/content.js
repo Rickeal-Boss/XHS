@@ -223,12 +223,24 @@
     XHS_DL_UI.setBusy(false);
   }
 
-  function send(msg) {
-    if (!ctxAlive()) { notifyStale(); return; }
+  /**
+   * @param {Function} [cb] 可选的响应回调，收到 (res|null)。
+   *
+   * 之前这里丢弃响应（`void lastError`），于是后台因 busy / empty / too-many
+   * 回 `{ok:false}` 时，本侧既不知道失败、也不会再收到任何 DL_* 消息，
+   * 看门狗压根没装弹 —— UI 永久停在 busy，只能刷新页面才能恢复。
+   * 需要知道结果的调用方（比如提交下载）必须传 cb。
+   */
+  function send(msg, cb) {
+    if (!ctxAlive()) { notifyStale(); if (cb) cb(null); return; }
     try {
-      chrome.runtime.sendMessage(msg, function () { void chrome.runtime.lastError; });
+      chrome.runtime.sendMessage(msg, function (res) {
+        void chrome.runtime.lastError;
+        if (cb) cb(res || null);
+      });
     } catch (e) {
       notifyStale();
+      if (cb) cb(null);
     }
   }
 
@@ -719,9 +731,24 @@
     }
     XHS_DL_UI.setBusy(true);
     XHS_DL_UI.hideProgress();
+    // 双保险：万一后台一条消息都不回（比如它那边正忙、直接拒了这批），
+    // 看门狗仍会在超时后解锁 UI，不会永久卡死。
+    armBatchWatchdog();
     send({
       type: 'DOWNLOAD_BATCH',
       payload: { tasks: tasks, noteId: note.noteId }
+    }, function (res) {
+      // 后台可能因 busy / too-many / empty 直接拒绝。以前这里丢弃响应，
+      // 于是收不到 DL_START、看门狗没装弹、UI 永久 busy，只能刷新页面。
+      if (res && res.ok) return;
+      stopBatchWatchdog();
+      XHS_DL_UI.setBusy(false);
+      XHS_DL_UI.hideProgress();
+      var why = !res ? '提交失败：扩展上下文已失效，请刷新页面'
+        : res.error === 'busy' ? '后台仍有下载在进行，请稍后再试'
+        : res.error === 'too-many' ? '文件数量超出单批上限（300）'
+        : '提交失败，请重试';
+      XHS_DL_UI.toast(why, 'error');
     });
     return true;
   }
