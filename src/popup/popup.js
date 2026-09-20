@@ -155,8 +155,13 @@
     });
 
     els.btnOptions.addEventListener('click', function () {
-      chrome.runtime.openOptionsPage();
-      window.close();
+      // openOptionsPage 是异步切 tab：浏览器要先 focus 到 settings 标签页，
+      // 完成后才会调回调。若紧跟 window.close()，关 popup 会和切页竞争，
+      // 表现为"点了设置按钮什么也没发生"——这是本次的现场 bug。
+      // 兜底超时 1s：万一回调永远不来（极端情况），也别让 popup 一直挂着。
+      var done = false;
+      chrome.runtime.openOptionsPage(function () { done = true; window.close(); });
+      setTimeout(function () { if (!done) window.close(); }, 1000);
     });
   }
 

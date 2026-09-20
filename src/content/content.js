@@ -916,8 +916,12 @@
        *   - 用户的勾选状态按 note.video / note.images 的索引保留。
        */
       onRefresh: function () {
+        // 清掉可能残留的进度条（上次下载没跑完或被打断），避免和本次重扫结果混淆
+        XHS_DL_UI.hideProgress();
         requestRescan();
         XHS_DL_UI.toast('已请求刷新', 'success');
+        // RESCAN_DONE 处理器会在 current 仍为空时自动 tryDomFallback（content.js:587 附近），
+        // 这里不需要再触发一次；浏览器侧的真实 SPA 链路会自动走「多次重试 → 软刷新」兜底。
       },
       onOptions: function () {
         try { chrome.runtime.openOptionsPage(); } catch (e) { /* 忽略 */ }
