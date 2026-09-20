@@ -294,7 +294,113 @@ noThrow('BT-44', 'note.images 为 undefined 时 buildTasks 不崩溃（防御性
 }, 'content.js 的 sanitizeNote 总是补齐 images:[]，故生产路径不可达，属低危');
 
 /* ------------------------------------------------------------------ */
-/* 6. 常量                                                             */
+/* 6. buildCommentTasks                                                */
+/* ------------------------------------------------------------------ */
+H.suite('buildCommentTasks — 评论媒体（图片 / 语音）');
+
+function cmtAudio(over) {
+  return Object.assign({
+    kind: 'audio',
+    url: 'https://sns-video-hw.xhscdn.com/comment/voice1.m4a',
+    seq: 0,
+    comment: { commentId: 'c1', author: '路人甲', asrText: '' }
+  }, over || {});
+}
+
+function cmtImage(over) {
+  return Object.assign({
+    kind: 'image',
+    url: 'https://sns-img-qc.xhscdn.com/comment/img1',
+    seq: 0,
+    comment: { commentId: 'c2', author: '路人乙', asrText: '' }
+  }, over || {});
+}
+
+/* 评论对象只带评论自身字段（commentId/author/asrText），笔记信息必须由第三参传入 */
+var cmtNote = { noteId: '65f1a2b3000000001203abcd', title: '莫干山民宿' };
+
+/* --- 语音扩展名：跟随 URL 实际后缀 --- */
+var ca1 = D.buildCommentTasks([cmtAudio()], baseSettings(), cmtNote);
+eq('CMT-1', '语音文件名沿用 _voice 标记', ca1[0].name, '路人甲_1_voice.m4a');
+ok('CMT-2', '语音扩展名取 URL 的 .m4a，而不是硬编码 .mp4',
+  /\.m4a$/.test(ca1[0].name) && !/\.mp4$/.test(ca1[0].name), 'name=' + ca1[0].name);
+eq('CMT-3', '语音 kind=comment-audio', ca1[0].kind, 'comment-audio');
+
+/* --- 语音扩展名兜底 --- */
+eq('CMT-4', '语音 URL 无扩展名 → 回退 .m4a',
+  D.buildCommentTasks([cmtAudio({ url: 'https://sns-video-hw.xhscdn.com/comment/voice1' })],
+    baseSettings(), cmtNote)[0].name, '路人甲_1_voice.m4a');
+eq('CMT-5', '语音 URL 为未知后缀 → 回退 .m4a（不被 .mp4 覆盖）',
+  D.buildCommentTasks([cmtAudio({ url: 'https://sns-video-hw.xhscdn.com/comment/voice1.xyz' })],
+    baseSettings(), cmtNote)[0].name, '路人甲_1_voice.m4a');
+eq('CMT-6', '语音 URL 带 query 仍取后缀',
+  D.buildCommentTasks([cmtAudio({ url: 'https://sns-video-hw.xhscdn.com/comment/v.aac?x=1' })],
+    baseSettings(), cmtNote)[0].name, '路人甲_1_voice.aac');
+eq('CMT-7', 'asrText 存在时优先用于命名（行为未变）',
+  D.buildCommentTasks([cmtAudio({ comment: { commentId: 'c1', author: '路人甲', asrText: '这是一段语音' } })],
+    baseSettings(), cmtNote)[0].name, '这是一段语音_voice.m4a');
+
+/* --- 图片评论不受影响 --- */
+eq('CMT-8', '图片评论仍走 guessExt(url, .jpg)',
+  D.buildCommentTasks([cmtImage({ url: 'https://sns-img-qc.xhscdn.com/comment/img1.webp' })],
+    baseSettings(), cmtNote)[0].name, '路人乙_1.webp');
+eq('CMT-9', '图片评论无扩展名 → .jpg 兜底',
+  D.buildCommentTasks([cmtImage()], baseSettings(), cmtNote)[0].name, '路人乙_1.jpg');
+eq('CMT-10', '图片评论 kind=comment-image',
+  D.buildCommentTasks([cmtImage()], baseSettings(), cmtNote)[0].kind, 'comment-image');
+
+/* --- 目录：按笔记分目录 --- */
+var cd1 = D.buildCommentTasks([cmtImage()], baseSettings({ baseDir: '小红书下载' }), cmtNote);
+eq('CMT-11', '传入 note → 目录含「标题_id后6位」笔记标识',
+  cd1[0].dir, '小红书下载/评论/莫干山民宿_03abcd/');
+ok('CMT-12', '目录以 / 结尾', /\/$/.test(cd1[0].dir), 'dir=' + cd1[0].dir);
+eq('CMT-13', '不传 note → 回退旧的 评论/ 目录（向后兼容）',
+  D.buildCommentTasks([cmtImage()], baseSettings({ baseDir: '小红书下载' }))[0].dir,
+  '小红书下载/评论/');
+eq('CMT-14', 'note 为 null → 同样回退 评论/ 目录',
+  D.buildCommentTasks([cmtImage()], baseSettings({ baseDir: '小红书下载' }), null)[0].dir,
+  '小红书下载/评论/');
+
+/* 本次要修的 bug：两篇笔记的评论媒体曾落到同一目录，同名文件被 Chrome 改成 (1)(2) */
+var dirA = D.buildCommentTasks([cmtImage()], baseSettings({ baseDir: '小红书下载' }),
+  { noteId: '65f1a2b3000000001203abcd', title: '莫干山民宿' })[0].dir;
+var dirB = D.buildCommentTasks([cmtImage()], baseSettings({ baseDir: '小红书下载' }),
+  { noteId: '65f1a2b3000000001203ffff', title: '莫干山民宿' })[0].dir;
+ok('CMT-15', '标题相同、id 不同的两篇笔记 → 评论目录不相同', dirA !== dirB,
+  'dirA=' + dirA + ' dirB=' + dirB);
+eq('CMT-16', 'id 尾部区分生效', dirB, '小红书下载/评论/莫干山民宿_03ffff/');
+
+eq('CMT-17', '标题为空 → 标识只用 id 后 6 位',
+  D.buildCommentTasks([cmtImage()], baseSettings({ baseDir: '小红书下载' }),
+    { noteId: '65f1a2b3000000001203abcd', title: '' })[0].dir,
+  '小红书下载/评论/03abcd/');
+eq('CMT-18', '标题超过 20 字 → 截断到 20 字',
+  D.buildCommentTasks([cmtImage()], baseSettings({ baseDir: '小红书下载' }),
+    { noteId: 'n0001', title: '一二三四五六七八九十一二三四五六七八九十二三四五' })[0].dir,
+  '小红书下载/评论/一二三四五六七八九十一二三四五六七八九十_n0001/');
+eq('CMT-19', '标题含非法字符 → 先 sanitize 再进目录',
+  D.buildCommentTasks([cmtImage()], baseSettings({ baseDir: '小红书下载' }),
+    { noteId: 'n0001', title: '莫干山/民宿' })[0].dir,
+  '小红书下载/评论/莫干山_民宿_n0001/');
+eq('CMT-20', '笔记无 id 也无标题 → 退回 评论/ 目录',
+  D.buildCommentTasks([cmtImage()], baseSettings({ baseDir: '小红书下载' }), {})[0].dir,
+  '小红书下载/评论/');
+eq('CMT-21', 'noteId 短于 6 位时整体作为标识',
+  D.buildCommentTasks([cmtImage()], baseSettings({ baseDir: '小红书下载' }),
+    { noteId: 'ab12', title: '' })[0].dir,
+  '小红书下载/评论/ab12/');
+
+/* --- 空输入 / 缺字段 --- */
+eq('CMT-22', 'items 为空数组 → 无任务', D.buildCommentTasks([], baseSettings(), cmtNote).length, 0);
+eq('CMT-23', 'items 非数组 → 无任务', D.buildCommentTasks(null, baseSettings(), cmtNote).length, 0);
+eq('CMT-24', '条目无 url → 跳过',
+  D.buildCommentTasks([cmtImage({ url: '' }), cmtImage()], baseSettings(), cmtNote).length, 1);
+eq('CMT-25', '缺 comment 对象 → 昵称兜底为「匿名」',
+  D.buildCommentTasks([{ kind: 'image', url: 'https://sns-img-qc.xhscdn.com/a.jpg', seq: 0 }],
+    baseSettings(), cmtNote)[0].name, '匿名_1.jpg');
+
+/* ------------------------------------------------------------------ */
+/* 7. 常量                                                             */
 /* ------------------------------------------------------------------ */
 H.suite('常量');
 eq('CT-1', 'PLACEHOLDERS 共 8 项', D.PLACEHOLDERS.length, 8);

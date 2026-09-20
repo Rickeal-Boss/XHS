@@ -98,8 +98,9 @@ var XHS_DL_DOWNLOADER = (function () {
   }
 
   /** 从 URL 猜扩展名（兜底用）
-   * 注意：小红书把评论区语音标记成 .m4a URL，扩展名保留；不强行按"容器是 MP4"覆盖，
-   * 因为本地多数播放器（potplayer/vlc/qq影音等）都按扩展名 + 内部嗅探来识别。 */
+   * 落盘扩展名一律跟随 URL 实际后缀，不按"容器类型"改写：小红书评论区语音的 URL
+   * 通常以 .m4a 结尾，本地多数播放器（potplayer/vlc/qq影音等）按扩展名 + 内部嗅探
+   * 识别媒体类型，若强行写成 .mp4 会被当成视频。 */
   function guessExt(url, fallback) {
     try {
       var path = String(url).split('?')[0].toLowerCase();
@@ -160,19 +161,40 @@ var XHS_DL_DOWNLOADER = (function () {
   }
 
   /**
+   * 评论媒体目录的「笔记标识」。
+   *
+   * 评论对象里只有评论自身的信息（commentId / author / asrText），拿不到所属笔记，
+   * 所以由调用方把当前笔记作为第三个参数传进来。标识取「标题前 20 字 + 笔记 id 后 6 位」：
+   * 标题便于用户肉眼分辨，id 尾部保证标题相同（或为空）时仍然唯一。
+   */
+  function noteDirTag(note) {
+    if (!note || typeof note !== 'object') return '';
+    var title = sanitize(note.title || '').slice(0, 20);
+    var id = String(note.noteId || '');
+    var tail = id.length > 6 ? id.slice(-6) : id;
+    if (title && tail) return title + '_' + tail;
+    return title || tail;
+  }
+
+  /**
    * 评论区媒体（图片 / 语音）任务。
    *
-   * 目录：统一落到 baseDir/评论/ 下，避免和笔记主体文件混在一起。
-   * 语音的容器是 **MP4**（小红书用 sns-video 系域名分发音频，不存在
-   * sns-voice 域名，也不是 m4a/mp3），所以扩展名按 .mp4 落，
+   * 目录：落到 baseDir/评论/<笔记标识>/ 下。评论媒体在 UI 里的条目只带评论信息，
+   * 不带笔记信息，所以按笔记分目录必须靠第三个参数 note；note 缺失时退回
+   * baseDir/评论/（向后兼容，例如旧调用点或测试桩）。
+   * 不按笔记分目录时，两篇笔记的评论图会同名，Chrome 只能改成 (1)(2)，用户无法分辨归属。
+   *
+   * 语音的容器确实是 MP4（小红书用 sns-video 系域名分发音频，无服务端转码能力），
+   * 但落盘扩展名跟随 URL 实际后缀（通常是 .m4a），本地播放器才不会把语音当成视频；
    * 文件名带 _voice 后缀以便识别；有语音转写文字（asrText）时优先用它命名。
    */
-  function buildCommentTasks(items, settings) {
+  function buildCommentTasks(items, settings, note) {
     var tasks = [];
     if (!Array.isArray(items) || !items.length) return tasks;
 
     var root = String((settings && settings.baseDir) || '小红书下载').replace(/^[\\/]+|[\\/]+$/g, '');
-    var dir = (root ? root + '/' : '') + '评论/';
+    var tag = noteDirTag(note);
+    var dir = (root ? root + '/' : '') + '评论/' + (tag ? tag + '/' : '');
 
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
@@ -186,7 +208,7 @@ var XHS_DL_DOWNLOADER = (function () {
           kind: 'comment-audio',
           url: it.url,
           dir: dir,
-          name: label + '_voice.mp4',
+          name: label + '_voice' + guessExt(it.url, '.m4a'),
           fallbacks: []
         });
       } else {
