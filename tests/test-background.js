@@ -532,10 +532,12 @@ async function main() {
   /* ================================================================== */
 
   H.suite('background — SW 被回收后的启动自检');
-  /* 模拟「上一批执行到一半时 SW 被回收」：session 里残留批次记录 */
+  /* 模拟「上一批执行到一半时 SW 被回收」：session 里残留批次记录。
+     startedAt 必须落在新鲜度阈值（60s）之前，才算「真的被中断」——
+     刚刚写入的记录会被自检当作可能正在跑的新批次而原样保留（见 F-3）。 */
   var st15 = makeChromeStub();
   st15.session.xhs_dl_batch = {
-    tabId: 8888, noteId: 'note-x', startedAt: Date.now(),
+    tabId: 8888, noteId: 'note-x', startedAt: Date.now() - 120000,
     total: 5, cancelled: false, currentId: null
   };
   loadBackground(st15);
@@ -551,6 +553,110 @@ async function main() {
   loadBackground(st16);
   await tick(4);
   eq('BG-65', '无残留批次时不补发任何消息', st16.sent.length, 0);
+
+  /* ================================================================== */
+  /* F-3：启动自检与新一轮 runBatch 的竞态                                */
+  /* ================================================================== */
+  H.suite('background — F-3 启动自检不得误删新批次标记或误报中断');
+
+  /* 场景 1：残留标记是「刚刚」写入的 —— 很可能是正在跑的新批次。
+     自检既不能宣告中断，也不能清掉它的存续标记（否则它若再被 SW 回收，
+     下次启动找不到标记，自愈失效、UI 永久 busy）。 */
+  var stF = makeChromeStub();
+  stF.session.xhs_dl_batch = {
+    tabId: 9101, noteId: 'fresh', startedAt: Date.now(),
+    total: 3, cancelled: false, currentId: null
+  };
+  loadBackground(stF);
+  await tick(4);
+  ok('BG-82', '新批次先 setBatch、自检后跑：新批次的存续标记不被自检清掉',
+    !!(stF.session.xhs_dl_batch && stF.session.xhs_dl_batch.tabId === 9101),
+    'batch=' + JSON.stringify(stF.session.xhs_dl_batch));
+  eq('BG-83', '新批次正在跑时自检不发出 interrupted（不误报）',
+    stF.sent.filter(function (m) { return m.msg.type === 'DL_ALL_DONE'; }).length, 0);
+
+  /* 场景 2：阈值内（刚过去 5 秒）仍视为在跑 */
+  var stF2 = makeChromeStub();
+  stF2.session.xhs_dl_batch = {
+    tabId: 9102, noteId: 'fresh2', startedAt: Date.now() - 5000,
+    total: 2, cancelled: false, currentId: null
+  };
+  loadBackground(stF2);
+  await tick(4);
+  eq('BG-84', '阈值内（刚过去 5s）的批次不宣告中断',
+    stF2.sent.filter(function (m) { return m.msg.type === 'DL_ALL_DONE'; }).length, 0);
+
+  /* 场景 3：真正陈旧的残留（> 60s）→ 仍然正常宣告中断并通知（回归保护） */
+  var stS = makeChromeStub();
+  stS.session.xhs_dl_batch = {
+    tabId: 9200, noteId: 'stale', startedAt: Date.now() - 60001,
+    total: 7, cancelled: false, currentId: null
+  };
+  loadBackground(stS);
+  await tick(4);
+  var staleMsgs = stS.sent.filter(function (m) { return m.msg.type === 'DL_ALL_DONE'; });
+  eq('BG-85', '超过 60s 的陈旧残留仍宣告中断', staleMsgs.length, 1);
+  ok('BG-86', '陈旧残留通知携带 interrupted=true 且保留 total',
+    staleMsgs[0].tabId === 9200 &&
+    staleMsgs[0].msg.payload.interrupted === true &&
+    staleMsgs[0].msg.payload.total === 7,
+    'msg=' + JSON.stringify(staleMsgs[0] && staleMsgs[0].msg));
+  ok('BG-87', '陈旧残留的存续标记被清除',
+    stS.session.xhs_dl_batch === undefined,
+    'batch=' + JSON.stringify(stS.session.xhs_dl_batch));
+
+  /* 场景 4：startedAt 缺失 → 按陈旧处理（保守宣告中断，保持原自愈能力） */
+  var stM = makeChromeStub();
+  stM.session.xhs_dl_batch = {
+    tabId: 9300, noteId: 'nofield', total: 4, cancelled: false, currentId: null
+  };
+  loadBackground(stM);
+  await tick(4);
+  var mMsgs = stM.sent.filter(function (m) { return m.msg.type === 'DL_ALL_DONE'; });
+  ok('BG-88', 'startedAt 缺失时按陈旧处理：宣告中断并清除标记',
+    mMsgs.length === 1 && mMsgs[0].msg.payload.interrupted === true &&
+    stM.session.xhs_dl_batch === undefined,
+    'msgs=' + mMsgs.length + ' batch=' + JSON.stringify(stM.session.xhs_dl_batch));
+
+  /* 场景 5：自检只执行一次 —— 后续批次不会重复 notify */
+  var stOnce = makeChromeStub();
+  stOnce.session.xhs_dl_batch = {
+    tabId: 9400, noteId: 'once', startedAt: Date.now() - 120000,
+    total: 1, cancelled: false, currentId: null
+  };
+  loadBackground(stOnce);
+  await tick(4);
+  eq('BG-89', '自检只执行一次（启动时恰好 1 条 interrupted）',
+    stOnce.sent.filter(function (m) {
+      return m.msg.type === 'DL_ALL_DONE' && m.msg.payload.interrupted;
+    }).length, 1);
+  await dispatchBatch(stOnce, 9401, [task('a.jpg', HOST + 'a')], 'n');
+  eq('BG-90', '后续批次不会再次触发自检 notify',
+    stOnce.sent.filter(function (m) {
+      return m.msg.type === 'DL_ALL_DONE' && m.msg.payload.interrupted;
+    }).length, 1);
+
+  /* 场景 6：runBatch 确实先等待自检 —— 残留中断通知早于新批次的 DL_ALL_DONE */
+  var stOrder = makeChromeStub();
+  stOrder.session.xhs_dl_batch = {
+    tabId: 9500, noteId: 'prev', startedAt: Date.now() - 120000,
+    total: 2, cancelled: false, currentId: null
+  };
+  loadBackground(stOrder);
+  await dispatchBatch(stOrder, 9501, [task('a.jpg', HOST + 'a')], 'n');
+  var iIdx = -1, dIdx = -1;
+  stOrder.sent.forEach(function (m, i) {
+    if (m.msg.type !== 'DL_ALL_DONE') return;
+    if (m.tabId === 9500 && iIdx === -1) iIdx = i;
+    if (m.tabId === 9501 && dIdx === -1) dIdx = i;
+  });
+  ok('BG-91', 'runBatch 先等自检：残留中断通知早于新批次的 DL_ALL_DONE',
+    iIdx !== -1 && dIdx !== -1 && iIdx < dIdx,
+    'interrupted@' + iIdx + ' batchDone@' + dIdx);
+  eq('BG-92', '等待自检不影响新批次正常完成',
+    stOrder.sent.filter(function (m) {
+      return m.msg.type === 'DL_ALL_DONE' && m.tabId === 9501;
+    })[0].msg.payload.ok, 1);
 
   H.suite('background — 批次存续标记的写入与清理');
   var st17 = makeChromeStub({ completeDelay: 10 });

@@ -32,6 +32,14 @@ var DONE_LIMIT = 3000;
  */
 var BATCH_KEY = 'xhs_dl_batch';
 
+/**
+ * 残留批次被判为「真的被中断」的新鲜度阈值（毫秒）。
+ * 启动自检与新一轮 runBatch 的 setBatch 可能交叉执行：若残留记录是「刚刚」
+ * 才写入的，它很可能其实是正在正常跑的新批次，而非上一批的残骸。
+ * 60 秒远大于单文件下载的合理间隔，足以区分「正在跑」与「真被打断」。
+ */
+var BATCH_STALE_MS = 60 * 1000;
+
 /** downloadId -> {resolve, task, tabId} */
 var pending = new Map();
 /** 当前批次的活跃状态（SW 回收后丢失，仅作缓存；权威值在 session） */
@@ -433,6 +441,13 @@ async function downloadOne(task, tabId, state) {
 async function runBatch(tabId, tasks, noteId) {
   var state = { done: 0, total: tasks.length, failed: [], lastError: '', noteId: noteId };
 
+  // 先等启动自检跑完，再写本批的存续标记。
+  // 否则「自检 clearBatch」与「本批 setBatch」交叉执行会有两种错误后果：
+  //   1) setBatch(新) → clearBatch(自检)：新标记被误删，本批若再被 SW 回收，
+  //      下次启动找不到残留标记，自愈失效、UI 永久 busy；
+  //   2) setBatch(新) → 自检读到新标记：把正在跑的新批次误报成「上一批被中断」。
+  await startupCheck;
+
   // 批次开始就登记「本批存在」。若 SW 在此后中途被回收，
   // 这次写入会残留下来，成为启动自检补发 DL_ALL_DONE 的依据。
   await setBatch({
@@ -560,19 +575,42 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
  * 批次开始时写 BATCH_KEY，正常结束时删掉。SW 每次启动都会执行下面这段，
  * 只要 BATCH_KEY 还在，就说明上一批被打断了，补发一条带 interrupted 的
  * DL_ALL_DONE 让内容脚本解除忙碌状态。
+ *
+ * 抽成可等待的 Promise：runBatch 在 setBatch 之前 await 它，避免二者交叉执行
+ * （见 runBatch 开头的说明）。
  */
-getBatch().then(function (b) {
-  if (!b) return;
-  notify(b.tabId, 'DL_ALL_DONE', {
-    ok: 0,
-    failed: [],
-    total: b.total || 0,
-    skipped: 0,
-    lastError: 'interrupted',
-    interrupted: true
+function performStartupCheck() {
+  return getBatch().then(function (b) {
+    if (!b) return;
+
+    // 新鲜度兜底（双保险）：只有「开始得足够久」的残留才认定为真被打断。
+    // startedAt 缺失时按陈旧处理 —— 保守宣告中断，保持原有的自愈能力。
+    var startedAt = typeof b.startedAt === 'number' ? b.startedAt : null;
+    var stale = startedAt === null || (Date.now() - startedAt) > BATCH_STALE_MS;
+    if (!stale) {
+      // 这是一个「刚刚」写入的批次，很可能是自检与新一轮 setBatch 交叉时
+      // 撞见的正在执行的批次。既不能宣告中断（会误报），也不能清掉它的
+      // 存续标记（会让它再被回收时彻底失去自愈依据）——原样保留。
+      return;
+    }
+
+    notify(b.tabId, 'DL_ALL_DONE', {
+      ok: 0,
+      failed: [],
+      total: b.total || 0,
+      skipped: 0,
+      lastError: 'interrupted',
+      interrupted: true
+    });
+    return clearBatch();
+  }).then(function () {
+    // 自检只跑一次：置为已 resolve 的 Promise，后续批次 await 时立即通过，
+    // 也不会重复 notify。
+    startupCheck = Promise.resolve();
   });
-  return clearBatch();
-});
+}
+
+var startupCheck = performStartupCheck();
 
 /* ========================= 安装初始化 ========================= */
 
