@@ -675,11 +675,16 @@
     // 原因：那条消息是"设置变化时推一次"的，一旦因时序/重载等原因没送达，
     // 页面侧就会一直保持默认开启 —— 用户关了开关却仍在自动软刷新。
     // 把值放进请求里，页面侧每次都能拿到最新开关，不再依赖消息是否送达。
+    var spaOn = settings.spaSource !== false;
     window.postMessage({
       __channel: CHANNEL,
       type: 'REQUEST_RESCAN',
-      payload: { spaSource: settings.spaSource !== false }
+      payload: { spaSource: spaOn }
     }, targetOrigin());
+    // 关闭态才打一条，便于现场验证开关是否生效（开态打印太吵）。
+    if (!spaOn) {
+      try { console.log('[XHS-DL] 自动重新取源已关闭（已随请求下发）'); } catch (e) { /* ignore */ }
+    }
   }
 
   /* ========================= 下载 ========================= */
@@ -959,7 +964,14 @@
         // 这里不需要再触发一次；浏览器侧的真实 SPA 链路会自动走「多次重试 → 软刷新」兜底。
       },
       onOptions: function () {
-        try { chrome.runtime.openOptionsPage(); } catch (e) { /* 忽略 */ }
+        // ⚠️ chrome.runtime.openOptionsPage() 从内容脚本触发在 Edge MV3 下
+        // 经常"什么都不发生"（不报错也不开新页）。最稳的做法是直接拿扩展
+        // 自己的 URL 调 window.open，与 popup 那次 fix 同思路。
+        try {
+          window.open(chrome.runtime.getURL('src/options/options.html'), '_blank');
+        } catch (e) {
+          try { chrome.runtime.openOptionsPage(); } catch (e2) { /* ignore */ }
+        }
       },
       onDownload: doDownload,
       onCopyLinks: function (note, selected) {

@@ -1319,6 +1319,9 @@
       // 请求里每次都带，才是可靠的取值来源。
       if (d.payload && typeof d.payload.spaSource === 'boolean') {
         spaSourceEnabled = d.payload.spaSource;
+        if (!spaSourceEnabled) {
+          try { console.log('[XHS-DL 诊断] 自动重新取源已收到关闭指令'); } catch (e) { /* ignore */ }
+        }
       }
       respondRescan();
     } else if (d.type === 'SET_HOOK') {

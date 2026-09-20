@@ -830,5 +830,18 @@ if (oi !== -1) {
     seg.indexOf('window.close') === -1 ? '' : '片段内出现了 window.close');
 }
 
+/* ================================================================== */
+/* PART A-11 — 面板齿轮 onOptions 必须走 getURL + window.open            */
+/* ================================================================== */
+/**
+ * 踩过的坑：chrome.runtime.openOptionsPage() 从**内容脚本**触发在 Edge MV3
+ * 下经常"什么都不发生"（不报错也不开新页）。面板齿轮的 onOptions handler
+ * 必须改走 window.open(chrome.runtime.getURL(...))，否则用户的齿轮不跳转。
+ */
+H.suite('面板齿轮 onOptions 用 getURL + window.open');
+var contentSrc2 = read('src/content/content.js');
+ok('OPT-URL-1', 'content.js 用 chrome.runtime.getURL + window.open 打开设置页',
+  /window\.open\(\s*chrome\.runtime\.getURL\(\s*['"]src\/options\/options\.html['"]/.test(contentSrc2));
+
 var S = H.summary('test-static.js');
 process.exit(S.fail ? 1 : 0);
