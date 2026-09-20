@@ -222,46 +222,108 @@ ok('CSS-DEAD', 'styles.js 死样式统计（观察项 O-03）', true,
 
 /* ================================================================== */
 /* PART A-5 — 设置项默认值一致性                                        */
+/* 默认值在 content.js / options.js / background.js / popup.js 各有一份  */
+/* 副本，任何一份漂移都会让「用户没打开过设置页」时的行为与预期不符，      */
+/* 因此这里逐键、逐值钉死，禁止以后各自演化。                            */
 /* ================================================================== */
 H.suite('静态一致性 — 设置项默认值');
 
+/** 按顶层逗号切分对象体（跳过引号内的逗号） */
+function splitTopLevel(body) {
+  var parts = [], cur = '', q = null;
+  for (var i = 0; i < body.length; i++) {
+    var c = body[i];
+    if (q) {
+      cur += c;
+      if (c === '\\') { cur += body[++i]; continue; }
+      if (c === q) q = null;
+      continue;
+    }
+    if (c === "'" || c === '"') { q = c; cur += c; continue; }
+    if (c === ',') { parts.push(cur); cur = ''; continue; }
+    cur += c;
+  }
+  parts.push(cur);
+  return parts;
+}
+
+/**
+ * 从源码里的对象字面量解析出 { 键: 归一化后的值 }。
+ * 纯文本解析而不 eval：background.js 那份写在 chrome.storage.local.set()
+ * 的实参里，直接执行会依赖 chrome API。
+ * 值统一剥掉外层引号，避免 'x' 与 "x" 被误判为不一致。
+ */
 function extractDefaults(src, startMarker) {
   var i = src.indexOf(startMarker);
   if (i === -1) return null;
   var j = src.indexOf('{', i);
-  var depth = 0, end = -1;
+  if (j === -1) return null;
+  var depth = 0, end = -1, quote = null;
   for (var k = j; k < src.length; k++) {
-    if (src[k] === '{') depth++;
-    else if (src[k] === '}') { depth--; if (depth === 0) { end = k; break; } }
+    var c = src[k];
+    if (quote) {
+      if (c === '\\') { k++; continue; }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) { end = k; break; } }
   }
   if (end === -1) return null;
-  var body = src.slice(j + 1, end);
+  // 先去掉行注释：content.js 中 streamPreference 上方有含「：」的说明注释，
+  // 不清理会被当成一个键值对
+  var body = src.slice(j + 1, end).replace(/\/\/[^\n]*/g, '');
+
   var out = {};
-  (body.match(/([A-Za-z_][A-Za-z0-9_]*)\s*:/g) || []).forEach(function (s) {
-    out[s.replace(/\s*:$/, '')] = 1;
+  splitTopLevel(body).forEach(function (chunk) {
+    var m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([\s\S]*?)\s*$/.exec(chunk);
+    if (!m) return;
+    var v = m[2];
+    if ((v[0] === "'" && v[v.length - 1] === "'") || (v[0] === '"' && v[v.length - 1] === '"')) {
+      v = v.slice(1, -1);
+    }
+    out[m[1]] = v;
   });
-  return Object.keys(out);
+  return out;
 }
 
-var contentDefaults = extractDefaults(read('src/content/content.js'), 'var DEFAULT_SETTINGS');
-var optionsDefaults = extractDefaults(optionsJs, 'var DEFAULTS');
-var bgDefaults = extractDefaults(read('src/background.js'), 'xhs_settings:');
-ok('DEF-1', 'content.js DEFAULT_SETTINGS 解析成功', !!contentDefaults);
-ok('DEF-2', 'options.js DEFAULTS 解析成功', !!optionsDefaults);
-ok('DEF-3', 'background.js onInstalled 默认设置解析成功', !!bgDefaults);
+/** 四份默认值副本（popup.js 是本次新增的第四份，同样纳入守门） */
+var DEFAULT_SOURCES = [
+  ['content.js', 'var DEFAULT_SETTINGS', read('src/content/content.js')],
+  ['options.js', 'var DEFAULTS', optionsJs],
+  ['background.js', 'xhs_settings:', read('src/background.js')],
+  ['popup.js', 'var DEFAULTS', popupJs]
+];
 
-var common = ['nameRule', 'timeFormat', 'imageFormat', 'videoQuality', 'liveMode',
-  'dirByAuthor', 'dirByTitle', 'baseDir', 'hookEnabled'];
-common.forEach(function (k) {
-  ok('DEF-' + k, '三个默认值来源都包含 ' + k,
-    contentDefaults.indexOf(k) !== -1 && optionsDefaults.indexOf(k) !== -1 && bgDefaults.indexOf(k) !== -1,
-    'content=' + contentDefaults.indexOf(k) + ' options=' + optionsDefaults.indexOf(k) + ' bg=' + bgDefaults.indexOf(k));
+var defaultMaps = {};
+DEFAULT_SOURCES.forEach(function (s) {
+  var map = extractDefaults(s[2], s[1]);
+  defaultMaps[s[0]] = map;
+  ok('DEF-PARSE-' + s[0], s[0] + ' 中解析出设置默认值',
+    !!map && Object.keys(map).length > 0, '未匹配到标记 ' + JSON.stringify(s[1]));
 });
-ok('DEF-4', 'background.js 中的 useTimeInName 在 content.js / options.js 中不存在（死设置提示）',
-  bgDefaults.indexOf('useTimeInName') !== -1 &&
-  contentDefaults.indexOf('useTimeInName') === -1 &&
-  optionsDefaults.indexOf('useTimeInName') === -1,
-  'useTimeInName 无任何消费方');
+
+var REF_SRC = 'content.js';
+var refKeys = Object.keys(defaultMaps[REF_SRC] || {}).sort();
+
+DEFAULT_SOURCES.forEach(function (s) {
+  if (s[0] === REF_SRC) return;
+  var keys = Object.keys(defaultMaps[s[0]] || {}).sort();
+  var missing = refKeys.filter(function (k) { return keys.indexOf(k) === -1; });
+  var extra = keys.filter(function (k) { return refKeys.indexOf(k) === -1; });
+  ok('DEF-KEYS-' + s[0], s[0] + ' 的默认值键集合与 ' + REF_SRC + ' 完全相同',
+    missing.length === 0 && extra.length === 0,
+    '缺：' + JSON.stringify(missing) + '，多：' + JSON.stringify(extra));
+});
+
+refKeys.forEach(function (k) {
+  DEFAULT_SOURCES.forEach(function (s) {
+    if (s[0] === REF_SRC) return;
+    eq('DEF-VAL-' + s[0] + '-' + k, s[0] + '.' + k + ' 默认值与 ' + REF_SRC + ' 相同',
+      (defaultMaps[s[0]] || {})[k], defaultMaps[REF_SRC][k]);
+  });
+});
 
 /* ================================================================== */
 /* PART B — 内容脚本真实装配（最小 DOM 桩）                             */

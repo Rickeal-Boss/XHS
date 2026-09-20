@@ -10,6 +10,26 @@
 (function () {
   'use strict';
 
+  /**
+   * 设置项默认值。
+   * popup 与内容脚本运行在不同上下文（无法 require content.js 里的
+   * DEFAULT_SETTINGS），因此这里保留一份副本。三处默认值副本
+   * （options.js / content.js / background.js）与本副本的一致性由
+   * tests/test-static.js 的 DEF-* 静态断言守门，改动时必须同步。
+   */
+  var DEFAULTS = {
+    nameRule: '[<发布者昵称>] <标题>_<序号>',
+    timeFormat: 'YYYYMMDD',
+    imageFormat: 'origin',
+    videoQuality: 'origin',
+    streamPreference: 'compat',
+    liveMode: 'both',
+    dirByAuthor: false,
+    dirByTitle: false,
+    baseDir: '小红书下载',
+    hookEnabled: true
+  };
+
   var els = {};
   var note = null;
   var settings = null;
@@ -99,7 +119,9 @@
     } catch (e) { /* 忽略 */ }
 
     chrome.storage.local.get('xhs_settings', function (r) {
-      settings = (r && r.xhs_settings) || {};
+      // 必须 merge DEFAULTS：用户从未打开过设置页时 storage 里没有 xhs_settings，
+      // 只取原始对象会让每个设置项都变成 undefined，updateHint() 会据此算错文件数。
+      settings = Object.assign({}, DEFAULTS, (r && r.xhs_settings) || {});
       updateHint();
     });
 

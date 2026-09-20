@@ -41,10 +41,33 @@
     status._t = setTimeout(function () { els.status.textContent = ''; }, 2200);
   }
 
+  /**
+   * 文本框 input 事件每敲一个字符触发一次，若每次都写 storage，
+   * 输入一段模板就会产生几十次写入。这里做 200ms 防抖，用户停手后才落盘。
+   * 下拉框 / 复选框的 change 事件不防抖 —— 那些是「一次决策」，
+   * 立即保存才能保证用户关掉页面时不丢设置。
+   */
+  var SAVE_DEBOUNCE_MS = 200;
+  var saveTimer = null;
+
   function save() {
+    // 立即保存时取消挂起的防抖，避免同一份 state 被写两次
+    clearTimeout(saveTimer);
+    saveTimer = null;
     chrome.storage.local.set({ xhs_settings: state }, function () {
+      // storage 写入可能因配额 / 权限失败。不检查 lastError 就提示「已保存」
+      // 会给用户假信号 —— 用户以为设置生效了，实际内容脚本读到的还是旧值。
+      if (chrome.runtime.lastError) {
+        status('保存失败：' + chrome.runtime.lastError.message);
+        return;
+      }
       status('已保存');
     });
+  }
+
+  function saveDebounced() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(save, SAVE_DEBOUNCE_MS);
   }
 
   /* --------------------------- 渲染 --------------------------- */
@@ -127,19 +150,19 @@
     els.nameRule.addEventListener('input', function () {
       state.nameRule = els.nameRule.value;
       renderPreview();
-      save();
+      saveDebounced();
     });
 
     els.timeFormat.addEventListener('input', function () {
       state.timeFormat = els.timeFormat.value;
       renderPreview();
-      save();
+      saveDebounced();
     });
 
     els.baseDir.addEventListener('input', function () {
       state.baseDir = els.baseDir.value;
       renderPreview();
-      save();
+      saveDebounced();
     });
 
     els.dirByAuthor.addEventListener('change', function () {
@@ -180,6 +203,10 @@
 
     els.btnClear.addEventListener('click', function () {
       chrome.storage.session.remove('xhs_dl_done_urls', function () {
+        if (chrome.runtime.lastError) {
+          status('清空失败：' + chrome.runtime.lastError.message);
+          return;
+        }
         status('已清空去重记录，之前下载过的文件可重新下载');
       });
     });
