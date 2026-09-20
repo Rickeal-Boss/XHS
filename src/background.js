@@ -378,6 +378,11 @@ async function downloadOne(task, tabId, state) {
   }
 
   for (var i = 0; i < urls.length; i++) {
+    // 用户点了取消就不该再换备用直链继续下 —— 那等于取消了又没取消。
+    // 每轮开始前重新读一次批次状态（取消标志跨 SW 重启存在 session 里）。
+    var cur = await getBatch();
+    if (cur && cur.cancelled) break;
+
     var path = buildPath(task.dir, task.name);
     var id;
     try {
