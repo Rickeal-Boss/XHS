@@ -164,8 +164,17 @@
   function isApiUrl(url) {
     if (!url || typeof url !== 'string') return false;
     var lower = url.toLowerCase();
-    // 国际站同样走 /api/sns/... 接口，只认 xiaohongshu.com 会漏掉 rednote.com
-    if (lower.indexOf('xiaohongshu.com') === -1 && lower.indexOf('rednote.com') === -1) {
+    // 国际站同样走 /api/sns/... 接口，只认 xiaohongshu.com 会漏掉 rednote.com。
+    // ⚠️ 相对路径（形如 '/api/sns/web/v1/feed'）里没有域名，字面匹配会直接判否，
+    // 导致整条 API 旁路**静默失效**（表现：只能 DOM 降级，刷新才偶尔好）。
+    // 因此必须先用页面 URL 归一化，取出 hostname 再判域名。
+    var host = '';
+    try {
+      host = (new URL(url, location.href).hostname || '').toLowerCase();
+    } catch (e) { /* 解析失败时 host 保持空，走下面的宽松判定 */ }
+    if (host &&
+        host.indexOf('xiaohongshu.com') === -1 &&
+        host.indexOf('rednote.com') === -1) {
       return false;
     }
     for (var i = 0; i < BINARY_HINTS.length; i++) {
@@ -569,6 +578,26 @@
   var lastScan = { visited: 0, found: 0, source: '', directHit: false, ms: 0 };
 
   /**
+   * 最近一次 emitNotes 投递的数据是否属于**当前 URL 这条笔记**。
+   *
+   * 历史上 emitNotes 返回 true 只代表"投递过一条 NOTE"，不保证是这一条 ——
+   * 于是上游误报成功 → 下游串台防护静默拒绝 → 兜底全被跳过 → 静默降级。
+   * 这是本项目反复踩的坑，因此把"是否属于当前笔记"单独记下来，
+   * 由 respondRescan 作为唯一判定依据。
+   */
+  var lastEmitAccepted = false;
+
+  /**
+   * URL 归属校验：URL 上取不到 noteId 时（首页/探索页等）无从校验，按接受处理，
+   * 保持与改动前一致的行为，避免误伤 feed 场景。
+   */
+  function acceptedForCurrent(noteData) {
+    var want = currentNoteId();
+    if (!want) return true;
+    return !!(noteData && noteData.noteId === want);
+  }
+
+  /**
    * @returns {boolean} 是否真的投递了一条 NOTE。
    *
    * 之前这个函数没有返回值，调用方 scanInitialState 只能凭
@@ -577,14 +606,16 @@
    * 现场问题因此完全无从下手。
    */
   function emitNotes(rawRoot, source) {
+    lastEmitAccepted = false;
     // 先按已知路径直取，命中即返回，避免在大号状态上做全树扫描
     var direct = pickFromKnownPaths(rawRoot);
     if (direct) {
       var fast = toNoteData(direct, source);
       if (fast) {
         lastScan = { visited: 1, found: 1, source: source, directHit: true, ms: 0 };
+        lastEmitAccepted = acceptedForCurrent(fast);
         post('NOTE', fast);
-        return true;
+        return lastEmitAccepted;
       }
     }
 
@@ -605,6 +636,9 @@
     };
     var notes = Object.keys(bag).map(function (k) { return bag[k]; });
     if (!notes.length) return false;
+    // 评论媒体与笔记是两条独立链路：即使这批里没有当前笔记，
+    // 评论提取也必须照常进行（handleJsonText 依赖这个行为）。
+    // 这里只决定"笔记算不算取到"。
 
     // 优先投递当前 URL 对应的笔记
     var want = currentNoteId();
@@ -621,7 +655,8 @@
       }, notes[0]);
     }
     post('NOTE', picked);
-    return true;
+    lastEmitAccepted = acceptedForCurrent(picked);
+    return lastEmitAccepted;
   }
 
   /* ======================= __INITIAL_STATE__ ======================= */
@@ -926,13 +961,46 @@
     } catch (e) { /* 忽略 */ }
   }
 
-  /** 播放健康看门狗：宿主视频一报错就立刻撤掉钩子 */
+  /**
+   * 播放健康看门狗。
+   *
+   * ⚠️ 旧实现是"任意一次 <video> error 就 uninstallHooks"，而重装入口只有
+   * SET_HOOK（扩展启动与设置变更时才发）—— 于是一次视频报错就让整个会话
+   * 再也抓不到 /api/sns/web/v1/feed 详情响应，只剩 DOM 兜底；
+   * 整页刷新会重装钩子，于是表现为"刷新就好"。这是本次要修的主痛点之一。
+   *
+   * 现在改为：连续 3 次 error 才卸载，且 30s 后自动重装（只排一次定时）。
+   */
+  var videoErrCount = 0;
+  var hookReinstallTimer = null;
+
   function watchPlaybackHealth() {
     document.addEventListener('error', function (ev) {
       var t = ev.target;
       if (!t || !t.tagName || String(t.tagName).toUpperCase() !== 'VIDEO') return;
-      if (hooks.installed) uninstallHooks('video-error');
+      videoErrCount++;
+      if (videoErrCount < 3) return;
+      if (!hooks.installed) return;
+      uninstallHooks('video-error');
+      if (hookReinstallTimer) return;
+      hookReinstallTimer = setTimeout(function () {
+        hookReinstallTimer = null;
+        videoErrCount = 0;
+        try {
+          installHooks();
+          post('HOOK_STATE', { active: hooks.installed });
+        } catch (e) { /* 忽略 */ }
+      }, 30000);
     }, true);
+
+    // 视频能正常起播，说明上一次 error 与钩子无关 —— 重置计数，避免误伤。
+    var resetErr = function (ev) {
+      var t = ev.target;
+      if (!t || !t.tagName || String(t.tagName).toUpperCase() !== 'VIDEO') return;
+      videoErrCount = 0;
+    };
+    document.addEventListener('canplay', resetErr, true);
+    document.addEventListener('loadeddata', resetErr, true);
   }
 
   /* ====================== XHR / fetch 旁路监听 ====================== */
@@ -1065,11 +1133,16 @@
    * 无论 key 顺序、无论预算大小都能读到），与其继续猜测，不如让扩展自己
    * 把状态形状吐出来：用户在控制台复制这一行就能定位到底卡在哪一环。
    */
-  function diagSnapshot() {
+  function diagSnapshot(reason) {
     var d = {
       noteId: currentNoteId(),
       href: '',
       hookInstalled: !!(hooks && hooks.installed),
+      // 隔离世界靠这三个字段判定"这次到底取到源没有" / "软刷新结果如何" / "是哪一次导航"
+      navSeq: navSeq,
+      softRefresh: softRefreshState,
+      urlIdInDetailMap: false,
+      reason: reason || '',
       hasState: false,
       stateType: '',
       stateKeys: [],
@@ -1092,7 +1165,12 @@
         d.hasNoteContainer = isObj(noteRoot);
         var map = isObj(noteRoot) ? get(noteRoot, 'note_detail_map') : null;
         d.hasDetailMap = isObj(map);
-        if (isObj(map)) d.detailMapKeys = Object.keys(map).slice(0, 10);
+        if (isObj(map)) {
+          d.detailMapKeys = Object.keys(map).slice(0, 10);
+          // URL 上这条笔记是否在容器里 —— "状态存在但没有当前笔记"是最常见的降级成因，
+          // 有这个字段就能一句话区分"状态压根没注入"和"注入了但不含这篇"。
+          d.urlIdInDetailMap = !!(d.noteId && map[d.noteId]);
+        }
         // 形态 B
         var nd = get(st, 'note_data');
         if (isObj(nd) && isObj(get(nd, 'data')) && isObj(get(get(nd, 'data'), 'note_data'))) {
@@ -1113,6 +1191,37 @@
     return d;
   }
 
+  /** 路由切换序号：每次 SPA 导航自增，随 diag 带出，用于区分"这次结果属于哪次导航" */
+  var navSeq = 0;
+  /** 最近一次软刷新的结果：idle | ok | failed | skipped */
+  var softRefreshState = 'idle';
+  var softRefreshLock = 0;
+
+  /**
+   * 页面内"软刷新"：同源 fetch 重取当前 URL 的 SSR HTML，再抠出 __INITIAL_STATE__。
+   *
+   * 这是消灭"必须 Ctrl+Shift+R 整页刷新"的关键：SPA 导航后 window.__INITIAL_STATE__
+   * 往往仍停留在首屏那份（或不含当前笔记），但服务端**每次**请求都会重新下发
+   * 一份完整的 SSR 状态。同源 fetch 自动带上登录态 cookie，不伪造请求、不碰
+   * x-s 签名 —— 行业先例（GreasyFork #592020「小红书微信模式」）明确宣称风控风险低。
+   *
+   * @returns {Promise<boolean>} 是否真的取到并投递了当前笔记
+   */
+  function softRefresh() {
+    return fetch(location.href, { credentials: 'include', headers: { Accept: 'text/html' } })
+      .then(function (r) { return r.text(); })
+      .then(function (html) {
+        if (!html || html.length > 3000000) return false;
+        var m = html.match(/__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})\s*;?\s*(?:<\/script>|$)/);
+        if (!m) return false;
+        var st = JSON.parse(m[1].replace(/:\s*undefined\b/g, ':null'));
+        // 评论媒体同样能从这份 SSR 状态里抠出来
+        emitCommentMedia(st);
+        return emitNotes(st, 'soft-refresh');
+      })
+      .catch(function () { return false; });
+  }
+
   function respondRescan() {
     var ok = scanInitialState('rescan');
     // 刷新时无条件再跑一次内联 script 扫描：用户点「刷新」通常是因为
@@ -1120,11 +1229,46 @@
     // 已被 SPA 替换 / 尚未就绪的情况。
     ok = scanInlineScript() || ok;
     post('MEDIA_HINTS', { videos: mediaSink.videos.slice() });
+
+    // 前两级都拿不到当前笔记时才上软刷新。节流 3s：用户连点刷新不应反复
+    // 拉整页 HTML（体积数百 KB，且可能计入站点统计）。
+    if (!ok && currentNoteId() && Date.now() - softRefreshLock > 3000) {
+      softRefreshLock = Date.now();
+      softRefreshState = 'ok';   // 先置 ok，真正失败时再改回，避免竞态下误报 failed
+      // 先告诉隔离世界"软刷新在飞"，它就不会急着降级到 DOM（否则软刷新
+      // 成功也会被已经发生的 DOM 兜底覆盖）。
+      post('RESCAN_DONE', {
+        noteId: currentNoteId(),
+        ok: ok,
+        accepted: false,
+        pendingSoftRefresh: true,
+        hookActive: hooks.installed,
+        diag: diagSnapshot('soft-pending')
+      });
+      softRefresh().then(function (got) {
+        softRefreshState = got ? 'ok' : 'failed';
+        post('RESCAN_DONE', {
+          noteId: currentNoteId(),
+          ok: ok || got,
+          accepted: !!got,
+          pendingSoftRefresh: false,
+          hookActive: hooks.installed,
+          diag: diagSnapshot(got ? 'soft-ok' : 'soft-failed')
+        });
+      });
+      return;
+    }
+    if (!ok) softRefreshState = currentNoteId() ? softRefreshState : 'skipped';
+
     post('RESCAN_DONE', {
       noteId: currentNoteId(),
       ok: ok,
+      // accepted 才是"取到了源"的唯一可信判定：ok 只代表投递过一条 NOTE，
+      // 不代表是这一条（可能被隔离世界的串台防护拒掉）。
+      accepted: ok && lastEmitAccepted,
+      pendingSoftRefresh: false,
       hookActive: hooks.installed,
-      diag: diagSnapshot()
+      diag: diagSnapshot('scan')
     });
   }
 
@@ -1173,15 +1317,79 @@
   // 靠用户手动刷页面。多扫一次成本极低，能显著降低 DOM 降级率。
   setTimeout(function () { scanInitialState('delay-9000'); scanInlineScript(); }, 9000);
 
-  // SPA 路由切换：URL 变化后重新扫描
+  /* ======================== SPA 路由切换 ======================== */
+
   var lastHref = location.href;
-  setInterval(function () {
-    if (location.href !== lastHref) {
-      lastHref = location.href;
-      setTimeout(function () {
-        scanInitialState('route-change');
-        post('ROUTE_CHANGE', { noteId: currentNoteId() });
-      }, 800);
+  var routeRetryTimers = [];
+
+  function clearRouteRetries() {
+    for (var i = 0; i < routeRetryTimers.length; i++) clearTimeout(routeRetryTimers[i]);
+    routeRetryTimers = [];
+  }
+
+  /**
+   * 路由切换处理。
+   *
+   * ⚠️ 顺序至关重要，旧实现反了：先 scanInitialState() 再 post('ROUTE_CHANGE')，
+   * 而隔离世界收到 ROUTE_CHANGE 会立刻 clearNote()，把刚扫到的笔记当场抹掉，
+   * 且此后没有任何重扫（1.5/4/9s 的定时扫描早已跑完）—— 于是 SPA 点开新笔记
+   * 必定空面板，只能整页刷新。这就是用户抱怨的"必须刷新整个网页"的直接成因。
+   *
+   * 正确顺序：先通知隔离世界清 UI，再扫描；并且**多次重试**而不是只扫一次，
+   * 因为 SPA 状态注入时机不确定（300ms 扫不到不代表 3s 后还没有）。
+   */
+  function onRouteChange() {
+    var href = location.href;
+    if (href === lastHref) return;
+    lastHref = href;
+    navSeq++;
+    clearRouteRetries();
+
+    post('ROUTE_CHANGE', { noteId: currentNoteId(), navSeq: navSeq });
+
+    var delays = [300, 800, 1500, 3000];
+    for (var i = 0; i < delays.length; i++) {
+      (function (delay, isLast) {
+        routeRetryTimers.push(setTimeout(function () {
+          // scanInitialState 现在返回"是否取到当前笔记"，命中即停
+          if (scanInitialState('route-change-' + delay)) {
+            clearRouteRetries();
+            return;
+          }
+          if (isLast) scanInlineScript();
+        }, delay));
+      })(delays[i], i === delays.length - 1);
     }
-  }, 1000);
+  }
+
+  // 事件驱动优先（比 1s 轮询及时得多，且不会漏掉"切走又切回同一 URL"的情况）
+  try {
+    var rawPush = history.pushState;
+    var rawReplace = history.replaceState;
+    history.pushState = function () {
+      var r = rawPush.apply(this, arguments);
+      setTimeout(onRouteChange, 0);
+      return r;
+    };
+    history.replaceState = function () {
+      var r = rawReplace.apply(this, arguments);
+      setTimeout(onRouteChange, 0);
+      return r;
+    };
+    maskNative(history.pushState, rawPush);
+    maskNative(history.replaceState, rawReplace);
+  } catch (e) { /* 忽略：改不动就靠下面的兜底 */ }
+
+  try {
+    if (window.navigation && typeof window.navigation.addEventListener === 'function') {
+      window.navigation.addEventListener('navigate', function () {
+        setTimeout(onRouteChange, 0);
+      });
+    }
+  } catch (e) { /* 忽略 */ }
+
+  window.addEventListener('popstate', function () { setTimeout(onRouteChange, 0); });
+
+  // 兜底轮询：上面三条都失效时仍能用（例如页面自己改了 location）
+  setInterval(onRouteChange, 1000);
 })();

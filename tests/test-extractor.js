@@ -743,11 +743,29 @@ async function main() {
   ok('EX-101', '注册了 document error 捕获监听', typeof errHandler === 'function');
   p1.messages.length = 0;
   errHandler({ target: { tagName: 'video' } });
+  errHandler({ target: { tagName: 'video' } });
+  // 旧实现是"一次 video error 就卸载"，而重装入口只有 SET_HOOK（扩展重启/改设置才发），
+  // 于是一次误报就让整个会话再也抓不到 API 响应 —— 表现为"必须整页刷新才好用"。
+  eq('EX-102a', '连续 2 次 video 报错仍不卸载（避免单次误报让整个会话失聪）',
+    p1.messages.filter(function (x) { return x.msg.type === 'HOOK_DISABLED'; }).length, 0);
+  errHandler({ target: { tagName: 'video' } });
   var hd = p1.messages.filter(function (x) { return x.msg.type === 'HOOK_DISABLED'; })[0];
-  eq('EX-102', '宿主 video 报错 → 自动卸载钩子', hd && hd.msg.payload.reason, 'video-error');
+  eq('EX-102', '连续 3 次 video 报错 → 自动卸载钩子', hd && hd.msg.payload.reason, 'video-error');
   var xhrAfter = new p1.sandbox.XMLHttpRequest();
   xhrAfter.open('GET', 'https://x.com/b');
   eq('EX-103', '看门狗触发后 XHR 钩子已还原', xhrAfter.__xhsDlUrl, undefined);
+
+  // 自愈：卸载后必须能自己装回来，否则只能靠用户整页刷新。
+  p1.messages.length = 0;
+  var reinstall = p1.timers.filter(function (t) { return t.ms === 30000; })[0];
+  ok('EX-103a', '卸载后注册了 30s 自动重装定时器', !!reinstall,
+    'timers=' + JSON.stringify(p1.timers.map(function (t) { return t.ms; })));
+  if (reinstall) reinstall.fn();
+  var hsAfter = p1.messages.filter(function (x) { return x.msg.type === 'HOOK_STATE'; })[0];
+  eq('EX-103b', '30s 后钩子自动重装成功', hsAfter && hsAfter.msg.payload.active, true);
+  var xhrBack = new p1.sandbox.XMLHttpRequest();
+  xhrBack.open('GET', 'https://x.com/c');
+  eq('EX-103c', '重装后 XHR 钩子恢复工作', xhrBack.__xhsDlUrl, 'https://x.com/c');
 
   var p2 = load({ initialState: { note: noteA() }, pathname: '/explore/' + ID_A });
   p2.messages.length = 0;
@@ -793,6 +811,31 @@ async function main() {
   ok('EX-113', 'SPA 路由监听 setInterval 已注册',
     s1.intervals.some(function (t) { return t.ms === 1000; }),
     'intervals=' + JSON.stringify(s1.intervals.map(function (t) { return t.ms; })));
+
+  /* ---- SPA 路由切换：顺序与重试 ---- */
+  H.suite('SPA 路由切换顺序');
+  var rc = load({ initialState: { note: noteA() }, pathname: '/explore/' + ID_A });
+  rc.messages.length = 0;
+  rc.sandbox.location.href = ORIGIN + '/explore/' + ID_B;
+  rc.sandbox.location.pathname = '/explore/' + ID_B;
+  // 沙箱里没有 history / navigation，靠 1s 轮询兜底路径驱动
+  var rcInterval = rc.intervals.filter(function (t) { return t.ms === 1000; })[0];
+  ok('EX-114', 'SPA 路由监听已注册（轮询兜底）', typeof (rcInterval && rcInterval.fn) === 'function');
+  rcInterval.fn();
+  var firstType = rc.messages.length ? rc.messages[0].msg.type : '(none)';
+  // 旧实现先扫描后 post(ROUTE_CHANGE)，隔离世界收到就 clearNote()，把刚扫到的
+  // 笔记当场抹掉且不再重扫 —— SPA 点开新笔记必定空面板，只能整页刷新。
+  eq('EX-115', '路由切换后第一条消息必须是 ROUTE_CHANGE（先清 UI 再扫描）', firstType, 'ROUTE_CHANGE');
+  ok('EX-116', '切换后安排了多次重试扫描（300/800/1500/3000）',
+    rc.timers.some(function (t) { return t.ms === 300; }) &&
+    rc.timers.some(function (t) { return t.ms === 800; }) &&
+    rc.timers.some(function (t) { return t.ms === 1500; }) &&
+    rc.timers.some(function (t) { return t.ms === 3000; }),
+    'timers=' + JSON.stringify(rc.timers.map(function (t) { return t.ms; })));
+  var rcMsg = rc.messages.filter(function (x) { return x.msg.type === 'ROUTE_CHANGE'; })[0];
+  ok('EX-117', 'ROUTE_CHANGE 带 navSeq（用于区分这次结果属于哪次导航）',
+    !!(rcMsg && typeof rcMsg.msg.payload.navSeq === 'number' && rcMsg.msg.payload.navSeq > 0),
+    'navSeq=' + (rcMsg && rcMsg.msg.payload.navSeq));
 
   var S = H.summary('test-extractor.js');
   process.exit(S.fail ? 1 : 0);
