@@ -160,6 +160,8 @@ function makeChromeStub(opts) {
   var st = {
     sent: [],          // {tabId, msg}
     downloads: [],     // 下载调用记录
+    cancelled: [],     // chrome.downloads.cancel 调用记录（downloadId）
+    localWrites: [],   // chrome.storage.local.set 写入记录
     session: {},
     listeners: {},
     nextId: 1,
@@ -197,7 +199,15 @@ function makeChromeStub(opts) {
         });
         return Promise.resolve(id);
       },
-      search: function (q, cb) { cb([{ id: q.id, bytesReceived: 512, totalBytes: 1024 }]); }
+      search: function (q, cb) { cb([{ id: q.id, bytesReceived: 512, totalBytes: 1024 }]); },
+      // 真实 Chrome 里 cancel 会让下载转入 interrupted 状态，桩同样补一次 onChanged
+      cancel: function (id, cb) {
+        st.cancelled.push(id);
+        setImmediate(function () {
+          fireChanged({ id: id, state: { current: 'interrupted' }, error: { current: 'USER_CANCELED' } });
+        });
+        if (cb) cb();
+      }
     },
     runtime: {
       id: 'test-ext-id',
@@ -214,7 +224,7 @@ function makeChromeStub(opts) {
       },
       local: {
         get: function (k, cb) { cb({}); },
-        set: function (o, cb) { if (cb) cb(); }
+        set: function (o, cb) { st.localWrites.push(o); if (cb) cb(); }
       },
       onChanged: { addListener: function () {} }
     },
@@ -516,6 +526,121 @@ async function main() {
     /^var pending = new Map\(\);$/m.test(src), 'pending 未落 storage.session');
   ok('BG-44', '去重表已落 storage.session（符合 MV3 要求）',
     src.indexOf("chrome.storage.session.get(DONE_KEY") !== -1);
+
+  /* ================================================================== */
+  /* MV3 Service Worker 回收 —— 行为验证                                  */
+  /* ================================================================== */
+
+  H.suite('background — SW 被回收后的启动自检');
+  /* 模拟「上一批执行到一半时 SW 被回收」：session 里残留批次记录 */
+  var st15 = makeChromeStub();
+  st15.session.xhs_dl_batch = {
+    tabId: 8888, noteId: 'note-x', startedAt: Date.now(),
+    total: 5, cancelled: false, currentId: null
+  };
+  loadBackground(st15);
+  await tick(4);
+  var resume = st15.sent.filter(function (m) { return m.msg.type === 'DL_ALL_DONE'; });
+  eq('BG-61', 'SW 启动自检补发一条 DL_ALL_DONE', resume.length, 1);
+  eq('BG-62', '补发的 DL_ALL_DONE 发往残留批次记录的 tabId', resume[0].tabId, 8888);
+  eq('BG-63', '补发的 DL_ALL_DONE payload.interrupted = true', resume[0].msg.payload.interrupted, true);
+  ok('BG-64', '残留的 xhs_dl_batch 已被清除', st15.session.xhs_dl_batch === undefined,
+    'batch=' + JSON.stringify(st15.session.xhs_dl_batch));
+
+  var st16 = makeChromeStub();
+  loadBackground(st16);
+  await tick(4);
+  eq('BG-65', '无残留批次时不补发任何消息', st16.sent.length, 0);
+
+  H.suite('background — 批次存续标记的写入与清理');
+  var st17 = makeChromeStub({ completeDelay: 10 });
+  loadBackground(st17);
+  var p17 = dispatchBatch(st17, 21, [
+    task('1.jpg', HOST + 'a'),
+    task('2.jpg', HOST + 'b')
+  ], 'note17');
+  await tick(2);
+  ok('BG-66', '批次执行中 session 里存在 xhs_dl_batch 且 tabId 正确',
+    !!(st17.session.xhs_dl_batch && st17.session.xhs_dl_batch.tabId === 21),
+    'batch=' + JSON.stringify(st17.session.xhs_dl_batch));
+  var res17 = await p17;
+  ok('BG-67', '批次正常结束后 session 里不再有 xhs_dl_batch',
+    st17.session.xhs_dl_batch === undefined,
+    'batch=' + JSON.stringify(st17.session.xhs_dl_batch));
+  var done17 = res17.messages.filter(function (m) { return m.msg.type === 'DL_ALL_DONE'; });
+  ok('BG-68', '批次正常结束且 DL_ALL_DONE 不带 interrupted 标记',
+    done17.length === 1 && done17[0].msg.payload.interrupted === undefined,
+    'DL_ALL_DONE 数量=' + done17.length);
+
+  H.suite('background — 取消真正中断当前文件');
+  var st18 = makeChromeStub({ completeDelay: 30 });
+  loadBackground(st18);
+  var p18 = dispatchBatch(st18, 31, [
+    task('1.jpg', HOST + '1'), task('2.jpg', HOST + '2'),
+    task('3.jpg', HOST + '3'), task('4.jpg', HOST + '4')
+  ], 'note18');
+  await tick(4);
+  st18.listeners.message({ type: 'CANCEL_BATCH' }, { id: 'test-ext-id', tab: { id: 31 } }, function () {});
+  await tick(3);
+  ok('BG-69', 'CANCEL_BATCH 对当前 downloadId 调用 chrome.downloads.cancel',
+    st18.cancelled.length >= 1 && st18.cancelled[0] === st18.downloads[0].id,
+    'cancelled=' + JSON.stringify(st18.cancelled) +
+    ' downloads=' + JSON.stringify(st18.downloads.map(function (d) { return d.id; })));
+  ok('BG-70', '未调用 chrome.downloads.erase（保留文件以便用户找回）',
+    src.indexOf('chrome.downloads.erase(') === -1);
+  var res18 = await p18;
+  ok('BG-71', '取消后仍发出 DL_ALL_DONE',
+    res18.messages.some(function (m) { return m.msg.type === 'DL_ALL_DONE'; }));
+  ok('BG-72', '取消后不再继续下载后续任务', st18.downloads.length < 4,
+    'downloads=' + st18.downloads.length);
+  ok('BG-73', '取消后 session 里的 xhs_dl_batch 被清理',
+    st18.session.xhs_dl_batch === undefined,
+    'batch=' + JSON.stringify(st18.session.xhs_dl_batch));
+
+  H.suite('background — 去重按主直链记录（fallback 后不再重复下载）');
+  var st19 = makeChromeStub({ throwOn: ['/BAD'] });
+  loadBackground(st19);
+  var main19 = HOST + 'BAD/x';
+  var fb19 = HOST + 'ok1';
+  var res19 = await dispatchBatch(st19, 41, [task('1.jpg', main19, [fb19])], 'note19');
+  var dl19 = st19.session.xhs_dl_done_urls || [];
+  ok('BG-74', 'fallback 成功后主直链也被写入去重表', dl19.indexOf(main19) !== -1,
+    'done=' + JSON.stringify(dl19));
+  ok('BG-75', '实际成功的备用直链同样在去重表里', dl19.indexOf(fb19) !== -1,
+    'done=' + JSON.stringify(dl19));
+  eq('BG-76', '主直链失败 + fallback 成功，本批 ok=1',
+    res19.messages.filter(function (m) { return m.msg.type === 'DL_ALL_DONE'; })[0].msg.payload.ok, 1);
+
+  var before19 = st19.downloads.length;
+  var res19b = await dispatchBatch(st19, 41, [task('1.jpg', main19, [fb19])], 'note19');
+  eq('BG-77', '重跑同一任务时被去重跳过，不再发起任何下载',
+    st19.downloads.length, before19);
+  eq('BG-78', '重跑时 DL_SKIPPED count=1',
+    res19b.messages.filter(function (m) { return m.msg.type === 'DL_SKIPPED'; })[0].msg.payload.count, 1);
+
+  H.suite('background — onInstalled 默认设置与其它入口对齐');
+  var st20 = makeChromeStub();
+  loadBackground(st20);
+  st20.listeners.installed();
+  var def20 = (st20.localWrites[0] && st20.localWrites[0].xhs_settings) || {};
+  eq('BG-79', '默认设置含 streamPreference=compat', def20.streamPreference, 'compat');
+  ok('BG-80', '默认设置不再包含死字段 useTimeInName', !('useTimeInName' in def20),
+    'keys=' + Object.keys(def20).join(','));
+
+  /* 与 options.js 的 DEFAULTS 做字段集比对：两份默认值必须完全一致 */
+  var optSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'options', 'options.js'), 'utf8');
+  var dStart = optSrc.indexOf('var DEFAULTS = {');
+  var dEnd = dStart === -1 ? -1 : optSrc.indexOf('\n  };', dStart);
+  var optDefaults = null;
+  if (dStart !== -1 && dEnd !== -1) {
+    var objText = optSrc.slice(dStart + 'var DEFAULTS = '.length, dEnd + 4);
+    try { optDefaults = vm.runInNewContext('(' + objText + ')'); } catch (e) { optDefaults = null; }
+  }
+  ok('BG-81', '默认设置字段集与 options.js DEFAULTS 完全一致',
+    optDefaults !== null &&
+    Object.keys(optDefaults).sort().join(',') === Object.keys(def20).sort().join(','),
+    'options=' + (optDefaults && Object.keys(optDefaults).sort().join(',')) +
+    ' | background=' + Object.keys(def20).sort().join(','));
 
   var S = H.summary('test-background.js');
   process.exit(S.fail ? 1 : 0);

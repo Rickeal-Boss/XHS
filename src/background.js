@@ -25,9 +25,16 @@ var MAX_PATH_LEN = 180;
 var DONE_KEY = 'xhs_dl_done_urls';
 var DONE_LIMIT = 3000;
 
+/**
+ * 批次存续标记。批次开始时写入，正常结束时删除。
+ * SW 每次启动都会执行文件末尾的自检：只要还残留这条记录，
+ * 就说明上一批是在执行中途被回收打断的，需要补发 DL_ALL_DONE。
+ */
+var BATCH_KEY = 'xhs_dl_batch';
+
 /** downloadId -> {resolve, task, tabId} */
 var pending = new Map();
-/** 当前批次的活跃状态 */
+/** 当前批次的活跃状态（SW 回收后丢失，仅作缓存；权威值在 session） */
 var active = null;
 
 /* ========================= URL 白名单 ========================= */
@@ -210,6 +217,39 @@ function markDone(url) {
   });
 }
 
+/* ========================= 批次存续标记 ========================= */
+
+function getBatch() {
+  return new Promise(function (resolve) {
+    chrome.storage.session.get(BATCH_KEY, function (r) {
+      resolve((r && r[BATCH_KEY]) || null);
+    });
+  });
+}
+
+function setBatch(info) {
+  return new Promise(function (resolve) {
+    var o = {};
+    o[BATCH_KEY] = info;
+    chrome.storage.session.set(o, resolve);
+  });
+}
+
+function clearBatch() {
+  return new Promise(function (resolve) {
+    chrome.storage.session.remove(BATCH_KEY, resolve);
+  });
+}
+
+/** 局部更新批次记录（记录不存在时什么都不做） */
+function updateBatch(patch) {
+  return getBatch().then(function (b) {
+    if (!b) return;
+    Object.keys(patch).forEach(function (k) { b[k] = patch[k]; });
+    return setBatch(b);
+  });
+}
+
 /* ========================= 消息下发 ========================= */
 
 /**
@@ -221,6 +261,35 @@ function notify(tabId, type, payload) {
   try {
     chrome.tabs.sendMessage(tabId, { type: type, payload: payload }, function () {
       // 标签页可能已关闭或未注入内容脚本，忽略最后一个错误
+      void chrome.runtime.lastError;
+    });
+  } catch (e) { /* 忽略 */ }
+}
+
+/* ========================= 取消 ========================= */
+
+/**
+ * 真正中断「正在下载的那一个」。
+ * 只置 cancelled 标志是不够的：循环要到下一个任务开始前才 break，
+ * 当前文件照样会下完，20 分钟的兜底超时也还在计时。
+ */
+function cancelCurrent() {
+  var id = active && active.currentId != null ? active.currentId : null;
+  if (id != null) {
+    cancelDownload(id);
+    return;
+  }
+  // SW 可能刚被回收过，当前 downloadId 只留在 session 里
+  getBatch().then(function (b) {
+    if (b && b.currentId != null) cancelDownload(b.currentId);
+  });
+}
+
+function cancelDownload(id) {
+  try {
+    // 不调用 downloads.erase：用户可能还想在下载列表里找回这个文件
+    chrome.downloads.cancel(id, function () {
+      // 下载可能已经结束，忽略错误
       void chrome.runtime.lastError;
     });
   } catch (e) { /* 忽略 */ }
@@ -326,11 +395,21 @@ async function downloadOne(task, tabId, state) {
     if (id == null) continue;
 
     pending.set(id, { task: task, tabId: tabId });
+    // 记下「当前正在下的这一个」：CANCEL_BATCH 要靠它真正中断文件，
+    // 同时落 session，保证 SW 被回收后取消指令依然能找到这个 downloadId
+    if (active) active.currentId = id;
+    await updateBatch({ currentId: id });
 
     var stopPoll = pollBytes(id, tabId, task.name, state);
     var res = await waitForDownload(id);
     stopPoll();
+    if (active && active.currentId === id) active.currentId = null;
+    await updateBatch({ currentId: null });
     if (res.ok) {
+      // 去重表必须同时记下「主直链」：runBatch 的跳过判断用的是 task.url，
+      // 只记实际成功的备用直链，下次这一项仍会被当成没下过，
+      // 于是又把主直链重试一遍失败、再回退一次。
+      await markDone(task.url);
       await markDone(urls[i]);
       return true;
     }
@@ -349,6 +428,17 @@ async function downloadOne(task, tabId, state) {
 async function runBatch(tabId, tasks, noteId) {
   var state = { done: 0, total: tasks.length, failed: [], lastError: '', noteId: noteId };
 
+  // 批次开始就登记「本批存在」。若 SW 在此后中途被回收，
+  // 这次写入会残留下来，成为启动自检补发 DL_ALL_DONE 的依据。
+  await setBatch({
+    tabId: tabId,
+    noteId: noteId,
+    startedAt: Date.now(),
+    total: tasks.length,
+    cancelled: false,
+    currentId: null
+  });
+
   // 去重：同一会话内已成功下载过的 URL 直接跳过
   var doneList = await getDone();
   var todo = tasks.filter(function (t) { return doneList.indexOf(t.url) === -1; });
@@ -363,6 +453,10 @@ async function runBatch(tabId, tasks, noteId) {
 
   for (var i = 0; i < todo.length; i++) {
     if (!active || active.cancelled) break;
+    // CANCEL_BATCH 会把 cancelled 落 session，每轮循环前重新读一次：
+    // 取消指令不会因为 SW 恰好在这期间被回收而丢失
+    var batchNow = await getBatch();
+    if (batchNow && batchNow.cancelled) break;
     var task = todo[i];
     notify(tabId, 'DL_PROGRESS', {
       done: state.done,
@@ -373,6 +467,9 @@ async function runBatch(tabId, tasks, noteId) {
     await downloadOne(task, tabId, state);
     state.done++;
   }
+
+  // 批次正常收尾（含被取消的收尾）→ 撤掉存续标记，避免下次启动误判为「被打断」
+  await clearBatch();
 
   notify(tabId, 'DL_ALL_DONE', {
     ok: state.done - state.failed.length,
@@ -412,12 +509,14 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         sendResponse({ ok: false, error: 'too-many' });
         return false;
       }
-      active = { cancelled: false };
+      active = { cancelled: false, currentId: null };
       sendResponse({ ok: true, accepted: tasks.length });
       runBatch(tabId, tasks, msg.payload.noteId).then(function () {
         active = null;
       }).catch(function () {
         active = null;
+        // 异常退出同样要撤掉存续标记，否则下次 SW 启动会误报「上一批被打断」
+        clearBatch();
         notify(tabId, 'DL_ALL_DONE', { ok: 0, failed: tasks.map(function (t) { return t.name; }), total: tasks.length });
       });
       return false;
@@ -425,6 +524,9 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 
     case 'CANCEL_BATCH': {
       if (active) active.cancelled = true;
+      cancelCurrent();
+      // 落 session：SW 若在这之后被回收，重启后的批次/去重逻辑仍能看到「已取消」
+      updateBatch({ cancelled: true });
       sendResponse({ ok: true });
       return false;
     }
@@ -438,6 +540,35 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   }
 });
 
+/* ===================== 启动自检（MV3 SW 回收恢复） ===================== */
+/**
+ * MV3 的 Service Worker 空闲约 30s 就会被回收。若回收恰好发生在批次执行中途，
+ * 模块级的 pending / active 会随旧执行上下文一起消失：
+ *   1. pending 清空 → onChanged 里 `if (!entry) return` → waitForDownload 的
+ *      resolve 永远不会被调用；
+ *   2. await waitForDownload(id) 连同旧上下文一起消失 → runBatch 的 for 循环中断；
+ *   3. DL_ALL_DONE 永不发出 → 内容脚本的 XHS_DL_UI.setBusy(false) 永不执行，
+ *      进度条永久卡住、isBusy() 恒为 true，之后任何下载都被「上一批还没结束」拒绝，
+ *      用户只能刷新页面才能恢复。
+ *
+ * pending 里含 Promise resolve，存不进 storage，所以不做「恢复」而做「宣告失败」：
+ * 批次开始时写 BATCH_KEY，正常结束时删掉。SW 每次启动都会执行下面这段，
+ * 只要 BATCH_KEY 还在，就说明上一批被打断了，补发一条带 interrupted 的
+ * DL_ALL_DONE 让内容脚本解除忙碌状态。
+ */
+getBatch().then(function (b) {
+  if (!b) return;
+  notify(b.tabId, 'DL_ALL_DONE', {
+    ok: 0,
+    failed: [],
+    total: b.total || 0,
+    skipped: 0,
+    lastError: 'interrupted',
+    interrupted: true
+  });
+  return clearBatch();
+});
+
 /* ========================= 安装初始化 ========================= */
 
 chrome.runtime.onInstalled.addListener(function () {
@@ -449,11 +580,11 @@ chrome.runtime.onInstalled.addListener(function () {
           timeFormat: 'YYYYMMDD',
           imageFormat: 'origin',
           videoQuality: 'origin',
+          streamPreference: 'compat',
           liveMode: 'both',
           dirByAuthor: false,
           dirByTitle: false,
           baseDir: '小红书下载',
-          useTimeInName: false,
           hookEnabled: true
         }
       });
